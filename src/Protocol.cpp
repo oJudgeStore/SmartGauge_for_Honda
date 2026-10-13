@@ -38,68 +38,13 @@ static const uint8_t SG_DIAG_INIT[] = {
   0x72, 0x05, 0x00, 0xF0, 0x99
 };
 
-// Live-data tables beyond 17/20 -- exact per-table byte offsets from
-// "PGMFI HONDA.pdf" (section E.6, tables 00/10/11/13/17/20/21/60/61/63/67/70/71/D1).
-// RPM/TPS/ECT (D9-D14) are at the same offset in every main-set table; only the
-// tail (IAT+MAP vs MAP-only vs EOT-only, and where BAT/INJ/IGT/SPEED land) differs,
-// so one decoder (sgDecodeMainLayout) is parameterized by SG_MAIN_LAYOUTS instead of
-// duplicating it per table. Table 17 keeps its own dedicated sgDecodeWaveMain() below
-// (real-vehicle-tested on the Wave ECU already, left untouched) even though its shape
-// matches layout C -- see the note on sgDecodeWaveMain for how it differs from the PDF.
-enum SgTableKind : uint8_t {
-  SG_KIND_MAIN,
-  SG_KIND_O2,
-  SG_KIND_ECMCODE,
-  SG_KIND_DIGITAL
-};
+// Live-data tables polled besides 17 (main sensors) and 20 (O2 bank 1): 00 (ECM ID)
+// and D1 (digital status). A raw scan ('s' over Serial) of a real ECU showed these
+// answer; 10/11/13/60/61/63 (IAT/MAP) and 21/71 (O2 bank 2) returned "no data", and
+// 67/70 just repeat 17/20 -- so none of those are polled or shown.
+static const uint8_t SG_EXT_TABLE_IDS[] = { 0x00, 0xD1 };
 
-#define SG_OFF_NONE 0xFF
-
-struct SgMainLayout {
-  uint8_t iatVOff, iatCOff;   // SG_OFF_NONE if this table has no IAT
-  uint8_t mapVOff, mapKpaOff; // SG_OFF_NONE if this table has no MAP
-  uint8_t eotVOff, eotCOff;   // SG_OFF_NONE if this table has no EOT
-  uint8_t batOff;
-  uint8_t injOff;             // 2 bytes: injOff, injOff+1
-  uint8_t igtOff;
-  uint8_t modeOff;            // MODE / FAST IDLE flag byte, SG_OFF_NONE if absent
-  uint8_t speedOff;
-};
-
-// Payload index = 4 + (D-number - 9), since payload[0..3] = response header/
-// length/query/table and payload[4] = D9 (see sgReadLiveTable).
-static const SgMainLayout SG_MAIN_LAYOUTS[] = {
-  // Layout A: tables 10, 11, 60, 61 (IAT + MAP, BAT/MODE/INJ/IGT/SPEED at D21-D26)
-  { 10, 11, 12, 13, SG_OFF_NONE, SG_OFF_NONE, 16, 18, 20, 17, 21 },
-  // Layout B: tables 13, 63 (IAT + MAP, no MODE, BAT/INJ/IGT/SPEED at D19-D25)
-  { 10, 11, 12, 13, SG_OFF_NONE, SG_OFF_NONE, 14, 15, 17, SG_OFF_NONE, 20 },
-  // Layout C: table 67 (EOT instead of IAT/MAP, FAST IDLE/MODE share one byte)
-  { SG_OFF_NONE, SG_OFF_NONE, SG_OFF_NONE, SG_OFF_NONE, 12, 13, 14, 15, 17, 18, 19 }
-};
-
-struct SgLiveTable {
-  uint8_t id;
-  SgTableKind kind;
-  uint8_t variant; // O2: sgGauge.o2[] index. MAIN: SG_MAIN_LAYOUTS[] index.
-};
-
-static const SgLiveTable SG_EXT_TABLES[] = {
-  { 0x00, SG_KIND_ECMCODE, 0 },
-  { 0x10, SG_KIND_MAIN,    0 },
-  { 0x11, SG_KIND_MAIN,    0 },
-  { 0x13, SG_KIND_MAIN,    1 },
-  { 0x21, SG_KIND_O2,      1 },
-  { 0x60, SG_KIND_MAIN,    0 },
-  { 0x61, SG_KIND_MAIN,    0 },
-  { 0x63, SG_KIND_MAIN,    1 },
-  { 0x67, SG_KIND_MAIN,    2 },
-  { 0x70, SG_KIND_O2,      0 }, // alt table id for the same bank-1 O2 sensor
-  { 0x71, SG_KIND_O2,      1 }, // alt table id for the same bank-2 O2 sensor
-  { 0xD1, SG_KIND_DIGITAL, 0 }
-};
-
-static const uint8_t SG_EXT_TABLE_COUNT =
-  sizeof(SG_EXT_TABLES) / sizeof(SG_EXT_TABLES[0]);
+static const uint8_t SG_EXT_TABLE_COUNT = sizeof(SG_EXT_TABLE_IDS);
 
 static uint8_t sgExtIndex = 0;
 
@@ -243,7 +188,7 @@ uint8_t sgKLineSendCapture(
 }
 
 // Generic "read live data table" request: 72 05 71 <tableId> <checksum>.
-// Shared by table 17/20 and every table in SG_EXT_TABLES.
+// Shared by table 17/20 and the tables in SG_EXT_TABLE_IDS.
 static uint8_t sgReadLiveTable(
   uint8_t tableId,
   uint8_t *payload,
@@ -443,64 +388,14 @@ static bool sgDecodeWaveMain() {
 
   if (sgMainPayloadLen > 0x13) {
     sgGauge.speedKmh = sgMainPayload[0x13]; // D24, PGMFI HONDA.pdf table 17
+
+    sgGauge.ext.eotTempC = (int16_t)sgMainPayload[0x0D] - 40; // D18: EOT
+    sgGauge.ext.fastIdleOn = (sgMainPayload[0x12] < 0x80);    // D23 < 128 = fast idle ON
+    sgGauge.ext.mode = (sgMainPayload[0x12] < 0x80)
+      ? sgMainPayload[0x12]
+      : sgMainPayload[0x12] - 0x80;
+    sgGauge.ext.ok = true;
   }
-
-  return true;
-}
-
-// PDF-accurate decode for tables 10/11/13/60/61/63/67 (SG_MAIN_LAYOUTS).
-static bool sgDecodeMainLayout(const uint8_t *payload, uint8_t len, uint8_t layoutIdx) {
-  if (len < 10) {
-    sgGauge.ext.ok = false;
-    return false;
-  }
-
-  const SgMainLayout &lay = SG_MAIN_LAYOUTS[layoutIdx];
-
-  sgGauge.rpm = ((uint16_t)payload[4] << 8) | payload[5];
-  sgGauge.tpsVolt = (float)payload[6] * (5.0f / 256.0f);
-  sgGauge.tps = (float)payload[7] * 0.5f;
-  sgGauge.tempC = (int16_t)payload[9] - 40;
-
-  if (lay.iatVOff != SG_OFF_NONE && lay.iatCOff < len) {
-    sgGauge.ext.iatVolt = (float)payload[lay.iatVOff] * (5.0f / 256.0f);
-    sgGauge.ext.iatTempC = (int16_t)payload[lay.iatCOff] - 40;
-  }
-
-  if (lay.mapVOff != SG_OFF_NONE && lay.mapKpaOff < len) {
-    sgGauge.ext.mapVolt = (float)payload[lay.mapVOff] * (5.0f / 256.0f);
-    sgGauge.ext.mapKpa = payload[lay.mapKpaOff];
-  }
-
-  if (lay.eotVOff != SG_OFF_NONE && lay.eotCOff < len) {
-    sgGauge.ext.eotVolt = (float)payload[lay.eotVOff] * (5.0f / 256.0f);
-    sgGauge.ext.eotTempC = (int16_t)payload[lay.eotCOff] - 40;
-  }
-
-  if (lay.batOff < len) {
-    sgGauge.batteryV = (float)payload[lay.batOff] * 0.1f;
-  }
-
-  if ((uint16_t)lay.injOff + 1 < len) {
-    const uint16_t rawInj =
-      ((uint16_t)payload[lay.injOff] << 8) | payload[lay.injOff + 1];
-    sgGauge.injectorMs = (float)rawInj / 200.0f;
-  }
-
-  if (lay.igtOff < len) {
-    sgGauge.ignitionDeg = -64.0f + ((float)payload[lay.igtOff] * 0.5f);
-  }
-
-  if (lay.modeOff != SG_OFF_NONE && lay.modeOff < len) {
-    sgGauge.ext.mode = payload[lay.modeOff];
-    sgGauge.ext.fastIdleOn = (payload[lay.modeOff] < 0x80);
-  }
-
-  if (lay.speedOff < len) {
-    sgGauge.speedKmh = payload[lay.speedOff];
-  }
-
-  sgGauge.ext.ok = true;
 
   return true;
 }
@@ -627,12 +522,12 @@ static bool sgReadTable20() {
   return true;
 }
 
-// Extended live-data tables (all remaining table IDs, SG_EXT_TABLES).
-static bool sgReadExtTable(const SgLiveTable &table) {
+// Extended live-data tables (SG_EXT_TABLE_IDS).
+static bool sgReadExtTable(uint8_t tableId) {
   uint8_t payload[SG_MAIN_PAYLOAD_MAX];
 
   const uint8_t len = sgReadLiveTable(
-    table.id,
+    tableId,
     payload,
     sizeof(payload),
     SG_T17_TIMEOUT_MS
@@ -642,28 +537,56 @@ static bool sgReadExtTable(const SgLiveTable &table) {
     return false;
   }
 
-  switch (table.kind) {
-    case SG_KIND_MAIN:
-      return sgDecodeMainLayout(payload, len, table.variant);
-
-    case SG_KIND_O2:
-      return sgDecodeO2Bank(payload, len, table.variant);
-
-    case SG_KIND_ECMCODE:
-      return sgDecodeEcmCode(payload, len);
-
-    case SG_KIND_DIGITAL:
-    default:
-      return sgDecodeDigitalStatus(payload, len);
-  }
+  return (tableId == 0x00)
+    ? sgDecodeEcmCode(payload, len)
+    : sgDecodeDigitalStatus(payload, len);
 }
 
 static void sgPollExtTable() {
-  const SgLiveTable &table = SG_EXT_TABLES[sgExtIndex];
-
-  sgReadExtTable(table);
+  sgReadExtTable(SG_EXT_TABLE_IDS[sgExtIndex]);
 
   sgExtIndex = (sgExtIndex + 1) % SG_EXT_TABLE_COUNT;
+}
+
+// Serial 's': ask the ECU for every known live table once and print the raw
+// payload, so you can see which tables your ECU actually answers.
+void sgScanLiveTables() {
+  static const uint8_t ids[] = {
+    0x00, 0x10, 0x11, 0x13, 0x17, 0x20, 0x21, 0x60, 0x61, 0x63, 0x67, 0x70, 0x71, 0xD1
+  };
+
+  if (!sgGauge.ecuConnected) {
+    Serial.println("[SCAN] ECU not connected yet");
+    return;
+  }
+
+  sgBusLock();
+
+  for (uint8_t i = 0; i < sizeof(ids); ++i) {
+    uint8_t payload[SG_MAIN_PAYLOAD_MAX];
+
+    const uint8_t len = sgReadLiveTable(ids[i], payload, sizeof(payload), SG_T17_TIMEOUT_MS);
+
+    Serial.printf("[SCAN] T%02X ", ids[i]);
+
+    if (len == 0) {
+      Serial.println("no valid reply");
+    } else if (len <= 4) {
+      Serial.println("no data (table not supported)");
+    } else {
+      Serial.printf("%u data bytes:", len - 4);
+
+      for (uint8_t k = 4; k < len; ++k) {
+        Serial.printf(" %02X", payload[k]);
+      }
+
+      Serial.println();
+    }
+
+    delay(SG_KLINE_GAP_MS);
+  }
+
+  sgBusUnlock();
 }
 
 // ============================================================================

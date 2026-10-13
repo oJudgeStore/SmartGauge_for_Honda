@@ -12,8 +12,9 @@ struct O2Bank {
   bool ok = false;
 };
 
-// Fields only some main-set tables carry (10,11,13,60,61,63,67) -
-// see PROTOCOL.md "Live data tables" for the per-table PDF byte offsets.
+// Only eotTempC/mode/fastIdleOn are filled (from table 17). The IAT/MAP fields
+// belong to tables 10/11/13/60/61/63, which the tested ECU does not answer, so
+// they stay 0 (kept so the 'L' log packet layout doesn't change).
 struct ExtSensors {
   float iatVolt = 0.0f;
   int16_t iatTempC = 0;
@@ -98,3 +99,6 @@ void sgKLineTaskStart();
 // Runs one poll step (wakeup/reconnect or a live-data table read). Called
 // only from the task sgKLineTaskStart() creates -- not from loop() anymore.
 void sgEngineTask();
+
+// Prints the raw reply of every known live-data table to Serial (command 's').
+void sgScanLiveTables();

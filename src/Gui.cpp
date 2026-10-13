@@ -66,12 +66,12 @@ static lv_obj_t *sgGuiPageObj[SG_GUI_PAGE_COUNT];
 // Page 0/1 widgets that sgGuiUpdate() refreshes from sgGauge every tick.
 static struct {
   lv_obj_t *status;
-  lv_obj_t *rpm, *tps, *temp, *bat, *inj, *ign, *speed, *o2, *mapKpa;
+  lv_obj_t *rpm, *tps, *temp, *bat, *inj, *ign, *speed, *o2;
 } sgP0;
 
 static struct {
   lv_obj_t *status;
-  lv_obj_t *iat, *eot, *mode, *o2b2, *gear, *fuelPump, *coolFan, *ecmId;
+  lv_obj_t *eot, *mode, *gear, *fuelPump, *coolFan, *ecmId;
 } sgP1;
 
 // 8 rows x 26 px fit between the caption (y=35) and the status line (y=250);
@@ -259,7 +259,6 @@ static void sgGuiBuildPage0(lv_obj_t *page) {
   sgGuiAddCaption(page, 10, 255, "IGN");
   sgGuiAddCaption(page, 170, 255, "SPEED");
   sgGuiAddCaption(page, 10, 330, "O2");
-  sgGuiAddCaption(page, 170, 330, "MAP");
   sgGuiAddPageNumber(page, 0);
 
   sgP0.status = sgGuiAddText(page, 10, 390, &lv_font_montserrat_22, SG_GUI_WARN, "CONNECTING...");
@@ -272,30 +271,25 @@ static void sgGuiBuildPage0(lv_obj_t *page) {
   sgP0.ign    = sgGuiAddValue(page, 10, 277, &lv_font_montserrat_34);
   sgP0.speed  = sgGuiAddValue(page, 170, 277, &lv_font_montserrat_34);
   sgP0.o2     = sgGuiAddValue(page, 10, 352, &lv_font_montserrat_34);
-  sgP0.mapKpa = sgGuiAddValue(page, 170, 352, &lv_font_montserrat_34);
 }
 
 static void sgGuiBuildPage1(lv_obj_t *page) {
-  sgGuiAddCaption(page, 10, 20, "IAT");
-  sgGuiAddCaption(page, 10, 95, "EOT");
-  sgGuiAddCaption(page, 170, 95, "MODE");
-  sgGuiAddCaption(page, 10, 170, "O2 BANK2");
-  sgGuiAddCaption(page, 170, 170, "GEAR/BANK");
-  sgGuiAddCaption(page, 10, 245, "FUEL PUMP");
-  sgGuiAddCaption(page, 170, 245, "COOL FAN");
-  sgGuiAddCaption(page, 10, 320, "ECM ID");
+  sgGuiAddCaption(page, 10, 20, "EOT");
+  sgGuiAddCaption(page, 170, 20, "MODE");
+  sgGuiAddCaption(page, 10, 95, "GEAR/BANK");
+  sgGuiAddCaption(page, 170, 95, "FUEL PUMP");
+  sgGuiAddCaption(page, 10, 170, "COOL FAN");
+  sgGuiAddCaption(page, 10, 245, "ECM ID");
   sgGuiAddPageNumber(page, 1);
 
   sgP1.status = sgGuiAddText(page, 10, 390, &lv_font_montserrat_22, SG_GUI_WARN, "CONNECTING...");
 
-  sgP1.iat      = sgGuiAddValue(page, 10, 42, &lv_font_montserrat_34);
-  sgP1.eot      = sgGuiAddValue(page, 10, 117, &lv_font_montserrat_34);
-  sgP1.mode     = sgGuiAddValue(page, 170, 117, &lv_font_montserrat_34);
-  sgP1.o2b2     = sgGuiAddValue(page, 10, 192, &lv_font_montserrat_34);
-  sgP1.gear     = sgGuiAddValue(page, 170, 192, &lv_font_montserrat_34);
-  sgP1.fuelPump = sgGuiAddValue(page, 10, 267, &lv_font_montserrat_34);
-  sgP1.coolFan  = sgGuiAddValue(page, 170, 267, &lv_font_montserrat_34);
-  sgP1.ecmId    = sgGuiAddValue(page, 10, 342, &lv_font_montserrat_34);
+  sgP1.eot      = sgGuiAddValue(page, 10, 42, &lv_font_montserrat_34);
+  sgP1.mode     = sgGuiAddValue(page, 170, 42, &lv_font_montserrat_34);
+  sgP1.gear     = sgGuiAddValue(page, 10, 117, &lv_font_montserrat_34);
+  sgP1.fuelPump = sgGuiAddValue(page, 170, 117, &lv_font_montserrat_34);
+  sgP1.coolFan  = sgGuiAddValue(page, 10, 192, &lv_font_montserrat_34);
+  sgP1.ecmId    = sgGuiAddValue(page, 10, 267, &lv_font_montserrat_34);
 }
 
 // ---------------------------------------------------------------------------
@@ -481,42 +475,20 @@ void sgGuiUpdate() {
     snprintf(buf, sizeof(buf), "%.2fV", sgGauge.o2[0].voltV);
     sgGuiSetText(sgP0.o2, buf);
 
-    // MAP comes from the slow-polled extended tables (10/11/13/60/61/63/67),
-    // not table 17/20 like the rest of this page -- same "--" until polled
-    // caveat as page 1's fields below.
-    if (sgGauge.ext.ok) {
-      snprintf(buf, sizeof(buf), "%ukPa", sgGauge.ext.mapKpa);
-      sgGuiSetText(sgP0.mapKpa, buf);
-    } else {
-      sgGuiSetText(sgP0.mapKpa, "--");
-    }
-
     return;
   }
 
-  // Page 1: extended tables -- each field shows "--" until its table has
-  // actually been polled once (SG_EXT_TABLES round-robins through all of
-  // them, so this can take a few seconds after connecting).
+  // Page 1: each field shows "--" until its table has been polled once
+  // (D1 and the ECM ID round-robin, so this can take a moment after connecting).
   if (sgGauge.ext.ok) {
-    snprintf(buf, sizeof(buf), "%dC", sgGauge.ext.iatTempC);
-    sgGuiSetText(sgP1.iat, buf);
-
     snprintf(buf, sizeof(buf), "%dC", sgGauge.ext.eotTempC);
     sgGuiSetText(sgP1.eot, buf);
 
     snprintf(buf, sizeof(buf), "%u %s", sgGauge.ext.mode, sgGauge.ext.fastIdleOn ? "FI" : "-");
     sgGuiSetText(sgP1.mode, buf);
   } else {
-    sgGuiSetText(sgP1.iat, "--");
     sgGuiSetText(sgP1.eot, "--");
     sgGuiSetText(sgP1.mode, "--");
-  }
-
-  if (sgGauge.o2[1].ok) {
-    snprintf(buf, sizeof(buf), "%.2fV", sgGauge.o2[1].voltV);
-    sgGuiSetText(sgP1.o2b2, buf);
-  } else {
-    sgGuiSetText(sgP1.o2b2, "--");
   }
 
   if (sgGauge.digital.ok) {

@@ -113,19 +113,9 @@ void sgPrintRealtimeData() {
     sgGauge.o2[0].stft,
     sgGauge.o2[0].heaterV);
 
-  if (sgGauge.o2[1].ok) {
-    Serial.printf(
-      "  [O2 bank2] %3.2fV STFT:%4.1f%% HTR:%3.2fV\n",
-      sgGauge.o2[1].voltV,
-      sgGauge.o2[1].stft,
-      sgGauge.o2[1].heaterV);
-  }
-
   if (sgGauge.ext.ok) {
     Serial.printf(
-      "  [EXT] IAT:%3dC MAP:%3ukPa EOT:%3dC MODE:%u FASTIDLE:%s\n",
-      sgGauge.ext.iatTempC,
-      sgGauge.ext.mapKpa,
+      "  [EXT] EOT:%3dC MODE:%u FASTIDLE:%s\n",
       sgGauge.ext.eotTempC,
       sgGauge.ext.mode,
       sgGauge.ext.fastIdleOn ? "ON" : "OFF");
@@ -188,6 +178,8 @@ void loop() {
       sgDtcClear();
     } else if (cmd == 'l' || cmd == 'L') {
       sgSendLogPacket();
+    } else if (cmd == 's' || cmd == 'S') {
+      sgScanLiveTables();
     } else if (cmd == 't' || cmd == 'T') {
       sgGuiCalibrateTouch();
     }

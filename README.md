@@ -7,7 +7,7 @@ bike's diagnostic connector and shows live engine data on a 3.5" touch screen, a
 (DTCs).
 
 - **Live gauges:** RPM, throttle, coolant temp, battery voltage, injector time, ignition timing, speed, O2 sensor.
-- **More sensors:** intake temp, oil temp, MAP, fuel pump, cooling fan, ECU ID.
+- **More sensors:** oil temp, ECU mode, gear/side-stand status, fuel pump, cooling fan, ECU ID.
 - **Fault codes:** read current and stored DTCs with names, and clear them, from the touch screen.
 
 It only reads from the ECU. The one thing it writes is "clear DTC" when you tap that button.
@@ -57,7 +57,7 @@ The transceiver's K-line pin goes to the bike's K-line (connector pin 2). These 
 5. After clearing, active faults can come straight back. Fix the cause too.
 
 Serial Monitor (115200 baud) also prints live values. Type `r` to read DTCs, `c` to clear, `t` to redo the touch
-calibration.
+calibration, and `s` to list which live-data tables your ECU answers.
 
 ## Troubleshooting
 
@@ -70,8 +70,10 @@ calibration.
 
 ## Limits
 
-- Built around the Wave 110i/125i ECU. Other PGM-FI ECUs use the same protocol but some values (temperatures,
-  injector time) may be scaled differently.
+- Built around the Wave 110i/125i ECU. Only the tables that answered on the tested ECU are used (17, 20, D1 and the
+  ECU ID). It has no intake-temp, MAP or second O2 sensor readings because that ECU does not provide those tables.
+  Other PGM-FI ECUs use the same protocol but may answer different tables or scale values differently; the `s`
+  command shows what yours answers.
 - Live data, DTC read and DTC clear are confirmed working on the board against an ECU on the bench. Use on a
   running bike has not been verified yet.
 - Use at your own risk. Do not rely on it for safety-critical decisions.
