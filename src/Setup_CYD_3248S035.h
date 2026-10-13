@@ -1,6 +1,6 @@
 // TFT_eSPI board config for the Sunton ESP32-3248S035R ("CYD" 3.5").
 //
-// Included from HondaKlineGauge.ino via USER_SETUP_LOADED -- but that only
+// Included from SmartGauge_for_Honda.ino via USER_SETUP_LOADED -- but that only
 // configures the .ino's OWN compilation. TFT_eSPI.cpp (and Extensions/Touch.cpp)
 // are separate translation units and never see a sketch-level #define, so this
 // same file also has to be copied into the TFT_eSPI library itself:

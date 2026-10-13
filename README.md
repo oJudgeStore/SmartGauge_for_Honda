@@ -1,4 +1,4 @@
-# HondaKlineGauge
+# SmartGauge for Honda
 
 [ภาษาไทย](README.th.md)
 
@@ -12,6 +12,9 @@ bike's diagnostic connector and shows live engine data on a 3.5" touch screen, a
 - **Only real data is shown:** when it connects, the gauge asks the ECU which data tables it supports and shows only the
   fields that have a working table. Different ECUs support different tables.
 - **Fault codes:** read current and stored DTCs with names, and clear them, from the touch screen.
+
+This is an independent project and is not affiliated with, or endorsed by, Honda. "Honda" and "PGM-FI" are
+used only to describe the bikes it works with.
 
 It only reads from the ECU. The one thing it writes is "clear DTC" when you tap that button.
 
@@ -45,7 +48,7 @@ The transceiver's K-line pin goes to the bike's K-line (connector pin 2). These 
    - Copy [`src/Setup_CYD_3248S035.h`](src/Setup_CYD_3248S035.h) to `libraries/TFT_eSPI/User_Setups/`. Then open
      `libraries/TFT_eSPI/User_Setup_Select.h`, comment out the line `#include <User_Setup.h>`, and add
      `#include <User_Setups/Setup_CYD_3248S035.h>` below it.
-4. Open `HondaKlineGauge.ino` (keep the folder name the same as the file name).
+4. Open `SmartGauge_for_Honda.ino` (keep the folder name the same as the file name).
 5. Choose **Tools > Board > ESP32 Dev Module**, pick your COM port, and click **Upload**.
 
 ## Using it

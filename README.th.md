@@ -1,4 +1,4 @@
-# HondaKlineGauge
+# SmartGauge for Honda
 
 [English](README.md)
 
@@ -46,7 +46,7 @@
     (MOSI 13 / MISO 12 / SCLK 14 จาก [`src/Setup_CYD_3248S035.h`](src/Setup_CYD_3248S035.h)) — มีแค่ขา
     `TOUCH_CS` (33) ที่แยกต่างหาก ซึ่งเป็นขาเดียวกับที่ TFT_eSPI ใช้กับ `getTouch()` อยู่แล้ว
   - `Preferences` — มากับ ESP32 core อยู่แล้ว ไม่ต้องติดตั้งเพิ่ม
-- เปิด [`HondaKlineGauge.ino`](HondaKlineGauge.ino) (ชื่อโฟลเดอร์ต้องตรงกับชื่อไฟล์ .ino)
+- เปิด [`SmartGauge_for_Honda.ino`](SmartGauge_for_Honda.ino) (ชื่อโฟลเดอร์ต้องตรงกับชื่อไฟล์ .ino)
   แล้วอัปโหลดที่ baud rate 115200
 
 ## ที่มา
@@ -64,7 +64,7 @@
 
 | ไฟล์ | เนื้อหา |
 | --- | --- |
-| `HondaKlineGauge.ino` | `setup()`/`loop()`, พิมพ์ค่าออก Serial |
+| `SmartGauge_for_Honda.ino` | `setup()`/`loop()`, พิมพ์ค่าออก Serial |
 | `src/Config.h` | ขาพิน, ค่าเวลาโปรโตคอล, ขนาดบัฟเฟอร์ |
 | `src/Protocol.h` / `.cpp` | ปลุก/เชื่อมต่อ K-line ใหม่ + อ่านตารางข้อมูลเรียลไทม์ |
 | `src/Dtc.h` / `.cpp` | อ่าน/ล้างรหัส DTC + ฐานข้อมูลรหัสภาษาไทย |
@@ -88,7 +88,7 @@
 - ส่วนติดต่อผู้ใช้ (GUI): widget ของ **lvgl** วาดลงจอ TFT บนบอร์ดผ่านไลบรารี **TFT_eSPI**
   (ติดตั้งทั้งสองตัวจาก Arduino Library Manager — ไม่ได้แนบมาในรีโปนี้) TFT_eSPI ยังทำหน้าที่
   push พิกเซลกับอ่านทัชอยู่ ส่วน lvgl คุม layout/widget/การรีเฟรชจอ ไฟล์ตั้งค่าพินเฉพาะบอร์ดอยู่ที่
-  `HondaKlineGauge/src/Setup_CYD_3248S035.h` ไฟล์ตั้งค่า lvgl คือ `HondaKlineGauge/src/lv_conf.h`
+  `SmartGauge_for_Honda/src/Setup_CYD_3248S035.h` ไฟล์ตั้งค่า lvgl คือ `SmartGauge_for_Honda/src/lv_conf.h`
   (ต้องคัดลอกเข้าไลบรารีแบบเดียวกัน ดูหัวข้อ "การติดตั้ง" ด้านบน) แสดงผลแบบ **แนวตั้ง (portrait)**
   (`setRotation(0)`, 320×480 — ถ้าจอกลับหัวบนอุปกรณ์ของคุณ ให้เปลี่ยนเป็น `setRotation(2)`
   ใน `sgGuiInit()`) มีทั้งหมด 3 หน้าจอ แบบ 2 คอลัมน์ — หน้ามาตรวัดหลัก, หน้าตารางเซ็นเซอร์แบบขยาย,
