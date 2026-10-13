@@ -100,8 +100,8 @@ modified copy, which includes a copy with the QR code removed. The link is `SG_Q
 
 Started from the "Educational Core" sketch in
 [Artid1994/Honda-K-Line-smart-guage-esp32-project-v1](https://github.com/Artid1994/Honda-K-Line-smart-guage-esp32-project-v1),
-then split into modules and extended. The table layouts and fault code list follow the public PGM-FI protocol
-reference.
+then split into modules and extended. That sketch is released under the MIT License (see [NOTICE](NOTICE)). The
+table layouts and fault code list follow the public PGM-FI protocol reference.
 
 ## License
 
@@ -112,5 +112,8 @@ Copyright (c) 2026 Pongsathorn Kerdphol. Licensed under
 - You may **not** use it commercially. That includes selling it, or selling devices that run it.
 - You may **not** share modified versions. You may change it for your own private use, for example the pins in
   `src/Config.h`.
+
+This license covers the author's own work. Code that comes from Artid1994's sketch stays under the MIT License,
+see [NOTICE](NOTICE).
 
 LVGL and TFT_eSPI are separate libraries under their own licenses and are not part of this repository.
