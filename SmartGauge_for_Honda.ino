@@ -1,3 +1,4 @@
+// SPDX-License-Identifier: CC-BY-NC-ND-4.0
 // ============================================================================
 // PROJECT: HONDA K-LINE CORE ENGINE - WAVE 110i / 125i ONLY
 // Hardware: ESP32-3248S035R (Sunton "CYD" 3.5" 480x320 ST7796 + XPT2046 touch)
