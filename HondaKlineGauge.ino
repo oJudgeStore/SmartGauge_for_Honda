@@ -92,36 +92,71 @@ void sgPrintRealtimeData() {
   lastPrintMs = millis();
 
   if (!sgGauge.ecuConnected) {
-    Serial.println(
-      "[STATUS] Connecting to Wave ECU...");
+    Serial.println("[STATUS] Connecting to Wave ECU...");
     return;
   }
 
-  Serial.printf(
-    "RPM:%4u | TPS:%5.1f%% (%3.2fV) | "
-    "TEMP:%3dC | BAT:%4.1fV | INJ:%4.2fms | "
-    "IGN:%4.1f deg | SPEED:%3u km/h | O2:%3.2fV STFT:%4.1f%% HTR:%3.2fV\n",
-    sgGauge.rpm,
-    sgGauge.tps,
-    sgGauge.tpsVolt,
-    sgGauge.tempC,
-    sgGauge.batteryV,
-    sgGauge.injectorMs,
-    sgGauge.ignitionDeg,
-    sgGauge.speedKmh,
-    sgGauge.o2[0].voltV,
-    sgGauge.o2[0].stft,
-    sgGauge.o2[0].heaterV);
+  const TableSupport &sup = sgGauge.support;
 
-  if (sgGauge.ext.ok) {
-    Serial.printf(
-      "  [EXT] EOT:%3dC MODE:%u FASTIDLE:%s\n",
-      sgGauge.ext.eotTempC,
-      sgGauge.ext.mode,
-      sgGauge.ext.fastIdleOn ? "ON" : "OFF");
+  if (!sup.probed) {
+    Serial.println("[STATUS] Testing data tables...");
+    return;
   }
 
-  if (sgGauge.digital.ok) {
+  // Only groups whose tables answered at connect are printed (see sgProbeTables()).
+  if (sup.main) {
+    Serial.printf(
+      "RPM:%4u | TPS:%5.1f%% (%3.2fV) | TEMP:%3dC | BAT:%4.1fV | INJ:%4.2fms | "
+      "IGN:%4.1f deg | SPEED:%3u km/h\n",
+      sgGauge.rpm,
+      sgGauge.tps,
+      sgGauge.tpsVolt,
+      sgGauge.tempC,
+      sgGauge.batteryV,
+      sgGauge.injectorMs,
+      sgGauge.ignitionDeg,
+      sgGauge.speedKmh);
+  }
+
+  if (sup.o2b1) {
+    Serial.printf(
+      "  [O2 bank1] %3.2fV STFT:%4.1f%% HTR:%3.2fV\n",
+      sgGauge.o2[0].voltV,
+      sgGauge.o2[0].stft,
+      sgGauge.o2[0].heaterV);
+  }
+
+  if (sup.o2b2) {
+    Serial.printf(
+      "  [O2 bank2] %3.2fV STFT:%4.1f%% HTR:%3.2fV\n",
+      sgGauge.o2[1].voltV,
+      sgGauge.o2[1].stft,
+      sgGauge.o2[1].heaterV);
+  }
+
+  if (sup.iat || sup.map || sup.eot || sup.mode) {
+    Serial.print("  [EXT]");
+
+    if (sup.iat) {
+      Serial.printf(" IAT:%3dC", sgGauge.ext.iatTempC);
+    }
+
+    if (sup.map) {
+      Serial.printf(" MAP:%3ukPa", sgGauge.ext.mapKpa);
+    }
+
+    if (sup.eot) {
+      Serial.printf(" EOT:%3dC", sgGauge.ext.eotTempC);
+    }
+
+    if (sup.mode) {
+      Serial.printf(" MODE:%u FASTIDLE:%s", sgGauge.ext.mode, sgGauge.ext.fastIdleOn ? "ON" : "OFF");
+    }
+
+    Serial.println();
+  }
+
+  if (sup.digital) {
     Serial.printf(
       "  [T D1] GEAR/BANK/STAND:%u FUEL_PUMP:%s COOLING_FAN:%s\n",
       sgGauge.digital.gearBankStand,
@@ -129,7 +164,7 @@ void sgPrintRealtimeData() {
       sgGauge.digital.coolingFanOn ? "ON" : "OFF");
   }
 
-  if (sgGauge.ecmCodeOk) {
+  if (sup.ecmId && sgGauge.ecmCodeOk) {
     Serial.printf(
       "  [ECM CODE] %02X%02X%02X%02X%02X\n",
       sgGauge.ecmCode[0], sgGauge.ecmCode[1], sgGauge.ecmCode[2],

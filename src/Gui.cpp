@@ -63,15 +63,28 @@ static const int16_t SG_GUI_BTN_CLEAR[4] = { 10, 330, 300, 40 };
 static uint8_t sgGuiPage = 0;
 static lv_obj_t *sgGuiPageObj[SG_GUI_PAGE_COUNT];
 
+// A caption + value pair. Which cells are shown, and where, depends on which
+// live-data tables the ECU answered at connect (sgGauge.support): cells with no
+// working table are hidden and the rest are repacked, two per row.
+struct SgCell {
+  lv_obj_t *cap;
+  lv_obj_t *val;
+  bool wide; // takes a whole row
+};
+
+enum { P0_TPS, P0_TEMP, P0_BAT, P0_INJ, P0_IGN, P0_SPEED, P0_O2, P0_MAP, P0_COUNT };
+enum { P1_IAT, P1_EOT, P1_MODE, P1_O2B2, P1_GEAR, P1_PUMP, P1_FAN, P1_ECM, P1_COUNT };
+
 // Page 0/1 widgets that sgGuiUpdate() refreshes from sgGauge every tick.
 static struct {
   lv_obj_t *status;
-  lv_obj_t *rpm, *tps, *temp, *bat, *inj, *ign, *speed, *o2;
+  lv_obj_t *rpmCap, *rpm;
+  SgCell c[P0_COUNT];
 } sgP0;
 
 static struct {
   lv_obj_t *status;
-  lv_obj_t *eot, *mode, *gear, *fuelPump, *coolFan, *ecmId;
+  SgCell c[P1_COUNT];
 } sgP1;
 
 // 8 rows x 26 px fit between the caption (y=35) and the status line (y=250);
@@ -250,46 +263,101 @@ static void sgGuiAddPageNumber(lv_obj_t *parent, uint8_t page) {
 // Page 0/1: gauge/sensor field labels
 // ---------------------------------------------------------------------------
 
+static void sgGuiAddCell(lv_obj_t *page, SgCell &cell, const char *caption, bool wide = false) {
+  cell.cap = sgGuiAddCaption(page, 0, 0, caption);
+  cell.val = sgGuiAddValue(page, 0, 0, &lv_font_montserrat_34);
+  cell.wide = wide;
+}
+
 static void sgGuiBuildPage0(lv_obj_t *page) {
-  sgGuiAddCaption(page, 10,  10, "RPM");
-  sgGuiAddCaption(page, 10, 105, "TPS");
-  sgGuiAddCaption(page, 170, 105, "TEMP");
-  sgGuiAddCaption(page, 10, 180, "BAT");
-  sgGuiAddCaption(page, 170, 180, "INJ");
-  sgGuiAddCaption(page, 10, 255, "IGN");
-  sgGuiAddCaption(page, 170, 255, "SPEED");
-  sgGuiAddCaption(page, 10, 330, "O2");
+  sgP0.rpmCap = sgGuiAddCaption(page, 10, 10, "RPM");
+  sgP0.rpm    = sgGuiAddValue(page, 10, 30, &lv_font_montserrat_48);
   sgGuiAddPageNumber(page, 0);
 
   sgP0.status = sgGuiAddText(page, 10, 390, &lv_font_montserrat_22, SG_GUI_WARN, "CONNECTING...");
 
-  sgP0.rpm    = sgGuiAddValue(page, 10, 30, &lv_font_montserrat_48);
-  sgP0.tps    = sgGuiAddValue(page, 10, 127, &lv_font_montserrat_34);
-  sgP0.temp   = sgGuiAddValue(page, 170, 127, &lv_font_montserrat_34);
-  sgP0.bat    = sgGuiAddValue(page, 10, 202, &lv_font_montserrat_34);
-  sgP0.inj    = sgGuiAddValue(page, 170, 202, &lv_font_montserrat_34);
-  sgP0.ign    = sgGuiAddValue(page, 10, 277, &lv_font_montserrat_34);
-  sgP0.speed  = sgGuiAddValue(page, 170, 277, &lv_font_montserrat_34);
-  sgP0.o2     = sgGuiAddValue(page, 10, 352, &lv_font_montserrat_34);
+  sgGuiAddCell(page, sgP0.c[P0_TPS], "TPS");
+  sgGuiAddCell(page, sgP0.c[P0_TEMP], "TEMP");
+  sgGuiAddCell(page, sgP0.c[P0_BAT], "BAT");
+  sgGuiAddCell(page, sgP0.c[P0_INJ], "INJ");
+  sgGuiAddCell(page, sgP0.c[P0_IGN], "IGN");
+  sgGuiAddCell(page, sgP0.c[P0_SPEED], "SPEED");
+  sgGuiAddCell(page, sgP0.c[P0_O2], "O2");
+  sgGuiAddCell(page, sgP0.c[P0_MAP], "MAP");
 }
 
 static void sgGuiBuildPage1(lv_obj_t *page) {
-  sgGuiAddCaption(page, 10, 20, "EOT");
-  sgGuiAddCaption(page, 170, 20, "MODE");
-  sgGuiAddCaption(page, 10, 95, "GEAR/BANK");
-  sgGuiAddCaption(page, 170, 95, "FUEL PUMP");
-  sgGuiAddCaption(page, 10, 170, "COOL FAN");
-  sgGuiAddCaption(page, 10, 245, "ECM ID");
   sgGuiAddPageNumber(page, 1);
 
   sgP1.status = sgGuiAddText(page, 10, 390, &lv_font_montserrat_22, SG_GUI_WARN, "CONNECTING...");
 
-  sgP1.eot      = sgGuiAddValue(page, 10, 42, &lv_font_montserrat_34);
-  sgP1.mode     = sgGuiAddValue(page, 170, 42, &lv_font_montserrat_34);
-  sgP1.gear     = sgGuiAddValue(page, 10, 117, &lv_font_montserrat_34);
-  sgP1.fuelPump = sgGuiAddValue(page, 170, 117, &lv_font_montserrat_34);
-  sgP1.coolFan  = sgGuiAddValue(page, 10, 192, &lv_font_montserrat_34);
-  sgP1.ecmId    = sgGuiAddValue(page, 10, 267, &lv_font_montserrat_34);
+  sgGuiAddCell(page, sgP1.c[P1_IAT], "IAT");
+  sgGuiAddCell(page, sgP1.c[P1_EOT], "EOT");
+  sgGuiAddCell(page, sgP1.c[P1_MODE], "MODE");
+  sgGuiAddCell(page, sgP1.c[P1_O2B2], "O2 BANK2");
+  sgGuiAddCell(page, sgP1.c[P1_GEAR], "GEAR/BANK");
+  sgGuiAddCell(page, sgP1.c[P1_PUMP], "FUEL PUMP");
+  sgGuiAddCell(page, sgP1.c[P1_FAN], "COOL FAN");
+  sgGuiAddCell(page, sgP1.c[P1_ECM], "ECM ID", true);
+}
+
+static void sgGuiShow(lv_obj_t *obj, bool show) {
+  if (show) {
+    lv_obj_remove_flag(obj, LV_OBJ_FLAG_HIDDEN);
+  } else {
+    lv_obj_add_flag(obj, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+// Shows the cells whose flag is set and packs them from y0 (caption row), two
+// per row, so a missing table leaves no gap on screen.
+static void sgGuiLayoutCells(SgCell *cells, const bool *show, uint8_t count, int16_t y0) {
+  int16_t y = y0;
+  uint8_t col = 0;
+
+  for (uint8_t i = 0; i < count; ++i) {
+    sgGuiShow(cells[i].cap, show[i]);
+    sgGuiShow(cells[i].val, show[i]);
+
+    if (!show[i]) {
+      continue;
+    }
+
+    if (cells[i].wide && col == 1) {
+      col = 0;
+      y += 75;
+    }
+
+    const int16_t x = (col == 0) ? 10 : 170;
+
+    lv_obj_set_pos(cells[i].cap, x, y);
+    lv_obj_set_pos(cells[i].val, x, y + 22);
+
+    if (cells[i].wide || col == 1) {
+      col = 0;
+      y += 75;
+    } else {
+      col = 1;
+    }
+  }
+}
+
+static uint16_t sgGuiSupportMask(const TableSupport &s) {
+  return (s.probed ? 0x100 : 0) | (s.main ? 1 : 0) | (s.iat ? 2 : 0) | (s.map ? 4 : 0) |
+         (s.eot ? 8 : 0) | (s.mode ? 16 : 0) | (s.o2b1 ? 32 : 0) | (s.o2b2 ? 64 : 0) |
+         (s.digital ? 128 : 0) | (s.ecmId ? 0x200 : 0);
+}
+
+// Re-lays out pages 0/1 when the set of working tables changes (a new ECU
+// connect). Before the probe finishes `s` is all-false, so nothing is shown.
+static void sgGuiApplySupport(const TableSupport &s) {
+  const bool p0[P0_COUNT] = { s.main, s.main, s.main, s.main, s.main, s.main, s.o2b1, s.map };
+  const bool p1[P1_COUNT] = { s.iat, s.eot, s.mode, s.o2b2, s.digital, s.digital, s.digital, s.ecmId };
+
+  sgGuiShow(sgP0.rpmCap, s.main);
+  sgGuiShow(sgP0.rpm, s.main);
+  sgGuiLayoutCells(sgP0.c, p0, P0_COUNT, 105);
+  sgGuiLayoutCells(sgP1.c, p1, P1_COUNT, 20);
 }
 
 // ---------------------------------------------------------------------------
@@ -406,6 +474,8 @@ void sgGuiInit() {
   sgGuiPageObj[SG_GUI_PAGE_DTC] = sgGuiMakePage();
   sgGuiBuildPageDtc(sgGuiPageObj[SG_GUI_PAGE_DTC]);
   lv_obj_add_flag(sgGuiPageObj[SG_GUI_PAGE_DTC], LV_OBJ_FLAG_HIDDEN);
+
+  sgGuiApplySupport(TableSupport());
 }
 
 // Drives LVGL's tick + timer/render/touch handling. Unthrottled (call every
@@ -440,77 +510,100 @@ void sgGuiUpdate() {
     return;
   }
 
-  lv_obj_t *statusLbl = (sgGuiPage == 0) ? sgP0.status : sgP1.status;
-  sgGuiSetText(statusLbl, sgGauge.ecuConnected ? "ECU CONNECTED" : "CONNECTING...");
-  lv_obj_set_style_text_color(statusLbl, sgGauge.ecuConnected ? SG_GUI_OK : SG_GUI_WARN, 0);
+  const TableSupport &sup = sgGauge.support;
 
-  if (!sgGauge.ecuConnected) {
+  static uint16_t appliedMask = 0xFFFF;
+  const uint16_t mask = sgGuiSupportMask(sup);
+
+  if (mask != appliedMask) {
+    appliedMask = mask;
+    sgGuiApplySupport(sup);
+  }
+
+  lv_obj_t *statusLbl = (sgGuiPage == 0) ? sgP0.status : sgP1.status;
+  const char *statusText = !sgGauge.ecuConnected ? "CONNECTING..."
+                         : !sup.probed           ? "TESTING TABLES..."
+                                                 : "ECU CONNECTED";
+  sgGuiSetText(statusLbl, statusText);
+  lv_obj_set_style_text_color(statusLbl, (sgGauge.ecuConnected && sup.probed) ? SG_GUI_OK : SG_GUI_WARN, 0);
+
+  if (!sgGauge.ecuConnected || !sup.probed) {
     return;
   }
 
   char buf[24];
 
   if (sgGuiPage == 0) {
-    snprintf(buf, sizeof(buf), "%4u", sgGauge.rpm);
-    sgGuiSetText(sgP0.rpm, buf);
+    if (sup.main) {
+      snprintf(buf, sizeof(buf), "%4u", sgGauge.rpm);
+      sgGuiSetText(sgP0.rpm, buf);
 
-    snprintf(buf, sizeof(buf), "%.1f%%", sgGauge.tps);
-    sgGuiSetText(sgP0.tps, buf);
+      snprintf(buf, sizeof(buf), "%.1f%%", sgGauge.tps);
+      sgGuiSetText(sgP0.c[P0_TPS].val, buf);
 
-    snprintf(buf, sizeof(buf), "%dC", sgGauge.tempC);
-    sgGuiSetText(sgP0.temp, buf);
+      snprintf(buf, sizeof(buf), "%dC", sgGauge.tempC);
+      sgGuiSetText(sgP0.c[P0_TEMP].val, buf);
 
-    snprintf(buf, sizeof(buf), "%.1fV", sgGauge.batteryV);
-    sgGuiSetText(sgP0.bat, buf);
+      snprintf(buf, sizeof(buf), "%.1fV", sgGauge.batteryV);
+      sgGuiSetText(sgP0.c[P0_BAT].val, buf);
 
-    snprintf(buf, sizeof(buf), "%.2fms", sgGauge.injectorMs);
-    sgGuiSetText(sgP0.inj, buf);
+      snprintf(buf, sizeof(buf), "%.2fms", sgGauge.injectorMs);
+      sgGuiSetText(sgP0.c[P0_INJ].val, buf);
 
-    snprintf(buf, sizeof(buf), "%.1f", sgGauge.ignitionDeg);
-    sgGuiSetText(sgP0.ign, buf);
+      snprintf(buf, sizeof(buf), "%.1f", sgGauge.ignitionDeg);
+      sgGuiSetText(sgP0.c[P0_IGN].val, buf);
 
-    snprintf(buf, sizeof(buf), "%u km/h", sgGauge.speedKmh);
-    sgGuiSetText(sgP0.speed, buf);
+      snprintf(buf, sizeof(buf), "%u km/h", sgGauge.speedKmh);
+      sgGuiSetText(sgP0.c[P0_SPEED].val, buf);
+    }
 
-    snprintf(buf, sizeof(buf), "%.2fV", sgGauge.o2[0].voltV);
-    sgGuiSetText(sgP0.o2, buf);
+    if (sup.o2b1) {
+      snprintf(buf, sizeof(buf), "%.2fV", sgGauge.o2[0].voltV);
+      sgGuiSetText(sgP0.c[P0_O2].val, buf);
+    }
+
+    if (sup.map) {
+      snprintf(buf, sizeof(buf), "%ukPa", sgGauge.ext.mapKpa);
+      sgGuiSetText(sgP0.c[P0_MAP].val, buf);
+    }
 
     return;
   }
 
-  // Page 1: each field shows "--" until its table has been polled once
-  // (D1 and the ECM ID round-robin, so this can take a moment after connecting).
-  if (sgGauge.ext.ok) {
+  if (sup.iat) {
+    snprintf(buf, sizeof(buf), "%dC", sgGauge.ext.iatTempC);
+    sgGuiSetText(sgP1.c[P1_IAT].val, buf);
+  }
+
+  if (sup.eot) {
     snprintf(buf, sizeof(buf), "%dC", sgGauge.ext.eotTempC);
-    sgGuiSetText(sgP1.eot, buf);
+    sgGuiSetText(sgP1.c[P1_EOT].val, buf);
+  }
 
+  if (sup.mode) {
     snprintf(buf, sizeof(buf), "%u %s", sgGauge.ext.mode, sgGauge.ext.fastIdleOn ? "FI" : "-");
-    sgGuiSetText(sgP1.mode, buf);
-  } else {
-    sgGuiSetText(sgP1.eot, "--");
-    sgGuiSetText(sgP1.mode, "--");
+    sgGuiSetText(sgP1.c[P1_MODE].val, buf);
   }
 
-  if (sgGauge.digital.ok) {
+  if (sup.o2b2) {
+    snprintf(buf, sizeof(buf), "%.2fV", sgGauge.o2[1].voltV);
+    sgGuiSetText(sgP1.c[P1_O2B2].val, buf);
+  }
+
+  if (sup.digital) {
     snprintf(buf, sizeof(buf), "%u", sgGauge.digital.gearBankStand);
-    sgGuiSetText(sgP1.gear, buf);
+    sgGuiSetText(sgP1.c[P1_GEAR].val, buf);
 
-    sgGuiSetText(sgP1.fuelPump, sgGauge.digital.fuelPumpOn ? "ON" : "OFF");
-    sgGuiSetText(sgP1.coolFan, sgGauge.digital.coolingFanOn ? "ON" : "OFF");
-  } else {
-    sgGuiSetText(sgP1.gear, "--");
-    sgGuiSetText(sgP1.fuelPump, "--");
-    sgGuiSetText(sgP1.coolFan, "--");
+    sgGuiSetText(sgP1.c[P1_PUMP].val, sgGauge.digital.fuelPumpOn ? "ON" : "OFF");
+    sgGuiSetText(sgP1.c[P1_FAN].val, sgGauge.digital.coolingFanOn ? "ON" : "OFF");
   }
 
-  if (sgGauge.ecmCodeOk) {
+  if (sup.ecmId && sgGauge.ecmCodeOk) {
     snprintf(
       buf, sizeof(buf), "%02X%02X%02X%02X%02X",
       sgGauge.ecmCode[0], sgGauge.ecmCode[1], sgGauge.ecmCode[2],
       sgGauge.ecmCode[3], sgGauge.ecmCode[4]
     );
-    sgGuiSetText(sgP1.ecmId, buf);
-  } else {
-    sgGuiSetText(sgP1.ecmId, "--");
+    sgGuiSetText(sgP1.c[P1_ECM].val, buf);
   }
 }

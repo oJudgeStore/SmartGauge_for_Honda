@@ -12,9 +12,8 @@ struct O2Bank {
   bool ok = false;
 };
 
-// Only eotTempC/mode/fastIdleOn are filled (from table 17). The IAT/MAP fields
-// belong to tables 10/11/13/60/61/63, which the tested ECU does not answer, so
-// they stay 0 (kept so the 'L' log packet layout doesn't change).
+// Fields only some main-set tables carry (10,11,13,60,61,63,67) -
+// see PROTOCOL.md "Live data tables" for the per-table PDF byte offsets.
 struct ExtSensors {
   float iatVolt = 0.0f;
   int16_t iatTempC = 0;
@@ -35,6 +34,23 @@ struct DigitalStatus {
   bool ok = false;
 };
 
+// Which groups of data the connected ECU actually provides. Filled once per
+// connect by sgProbeTables() (every known table is tested); until `probed` is
+// true nothing should be shown, and a field whose flag is false has no working
+// table and must stay off the screen.
+struct TableSupport {
+  bool probed = false;
+  bool main = false;    // RPM, TPS, ECT, battery, injector, ignition, speed
+  bool iat = false;
+  bool map = false;
+  bool eot = false;
+  bool mode = false;
+  bool o2b1 = false;
+  bool o2b2 = false;
+  bool digital = false; // gear/side stand, fuel pump, cooling fan
+  bool ecmId = false;
+};
+
 struct GaugeData {
   uint16_t rpm = 0;
   float tps = 0.0f;
@@ -50,8 +66,7 @@ struct GaugeData {
   uint8_t ecmCode[5];    // table 0x00 (ECM identification bytes)
   bool ecmCodeOk = false;
   bool ecuConnected = false;
-  bool t17Ok = false;
-  bool t20Ok = false;
+  TableSupport support;
 };
 
 // Mutated only by whichever side holds sgBusLock() (the K-line task, or a

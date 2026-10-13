@@ -38,26 +38,100 @@ static const uint8_t SG_DIAG_INIT[] = {
   0x72, 0x05, 0x00, 0xF0, 0x99
 };
 
-// Live-data tables polled besides 17 (main sensors) and 20 (O2 bank 1): 00 (ECM ID)
-// and D1 (digital status). A raw scan ('s' over Serial) of a real ECU showed these
-// answer; 10/11/13/60/61/63 (IAT/MAP) and 21/71 (O2 bank 2) returned "no data", and
-// 67/70 just repeat 17/20 -- so none of those are polled or shown.
-static const uint8_t SG_EXT_TABLE_IDS[] = { 0x00, 0xD1 };
+// Live-data tables beyond 17/20 -- exact per-table byte offsets from
+// "PGMFI HONDA.pdf" (section E.6, tables 00/10/11/13/17/20/21/60/61/63/67/70/71/D1).
+// RPM/TPS/ECT (D9-D14) are at the same offset in every main-set table; only the
+// tail (IAT+MAP vs MAP-only vs EOT-only, and where BAT/INJ/IGT/SPEED land) differs,
+// so one decoder (sgDecodeMainLayout) is parameterized by SG_MAIN_LAYOUTS instead of
+// duplicating it per table. Table 17 keeps its own dedicated sgDecodeWaveMain() below
+// (real-vehicle-tested on the Wave ECU already, left untouched) even though its shape
+// matches layout C -- see the note on sgDecodeWaveMain for how it differs from the PDF.
+enum SgTableKind : uint8_t {
+  SG_KIND_WAVE17,
+  SG_KIND_MAIN,
+  SG_KIND_O2,
+  SG_KIND_ECMCODE,
+  SG_KIND_DIGITAL
+};
 
-static const uint8_t SG_EXT_TABLE_COUNT = sizeof(SG_EXT_TABLE_IDS);
+#define SG_OFF_NONE 0xFF
 
-static uint8_t sgExtIndex = 0;
+struct SgMainLayout {
+  uint8_t iatVOff, iatCOff;   // SG_OFF_NONE if this table has no IAT
+  uint8_t mapVOff, mapKpaOff; // SG_OFF_NONE if this table has no MAP
+  uint8_t eotVOff, eotCOff;   // SG_OFF_NONE if this table has no EOT
+  uint8_t batOff;
+  uint8_t injOff;             // 2 bytes: injOff, injOff+1
+  uint8_t igtOff;
+  uint8_t modeOff;            // MODE / FAST IDLE flag byte, SG_OFF_NONE if absent
+  uint8_t speedOff;
+};
 
-static uint8_t sgMainPayload[SG_MAIN_PAYLOAD_MAX];
-static uint8_t sgAuxPayload[SG_AUX_PAYLOAD_MAX];
+// Payload index = 4 + (D-number - 9), since payload[0..3] = response header/
+// length/query/table and payload[4] = D9 (see sgReadLiveTable).
+static const SgMainLayout SG_MAIN_LAYOUTS[] = {
+  // Layout A: tables 10, 11, 60, 61 (IAT + MAP, BAT/MODE/INJ/IGT/SPEED at D21-D26)
+  { 10, 11, 12, 13, SG_OFF_NONE, SG_OFF_NONE, 16, 18, 20, 17, 21 },
+  // Layout B: tables 13, 63 (IAT + MAP, no MODE, BAT/INJ/IGT/SPEED at D19-D25)
+  { 10, 11, 12, 13, SG_OFF_NONE, SG_OFF_NONE, 14, 15, 17, SG_OFF_NONE, 20 },
+  // Layout C: table 67 (EOT instead of IAT/MAP, FAST IDLE/MODE share one byte)
+  { SG_OFF_NONE, SG_OFF_NONE, SG_OFF_NONE, SG_OFF_NONE, 12, 13, 14, 15, 17, 18, 19 }
+};
 
-static uint8_t sgMainPayloadLen = 0;
-static uint8_t sgAuxPayloadLen = 0;
+// What a working table lets the screen show. Which tables actually answer
+// depends on the ECU, so sgProbeTables() tests them all once per connect and
+// only the ones that answer are polled and only their fields are displayed.
+#define SG_CAP_MAIN    0x001 // RPM, TPS, ECT, battery, injector, ignition, speed
+#define SG_CAP_IAT     0x002
+#define SG_CAP_MAP     0x004
+#define SG_CAP_EOT     0x008
+#define SG_CAP_MODE    0x010
+#define SG_CAP_O2B1    0x020
+#define SG_CAP_O2B2    0x040
+#define SG_CAP_DIGITAL 0x080
+#define SG_CAP_ECMID   0x100
+
+struct SgLiveTable {
+  uint8_t id;
+  SgTableKind kind;
+  uint8_t variant; // O2: sgGauge.o2[] index. MAIN: SG_MAIN_LAYOUTS[] index.
+  uint16_t caps;
+};
+
+// Order matters: the first working MAIN table / first working O2B1 table is the
+// one polled most often.
+static const SgLiveTable SG_TABLES[] = {
+  { 0x17, SG_KIND_WAVE17,  0, SG_CAP_MAIN | SG_CAP_EOT | SG_CAP_MODE },
+  { 0x67, SG_KIND_MAIN,    2, SG_CAP_MAIN | SG_CAP_EOT | SG_CAP_MODE },
+  { 0x10, SG_KIND_MAIN,    0, SG_CAP_MAIN | SG_CAP_IAT | SG_CAP_MAP | SG_CAP_MODE },
+  { 0x11, SG_KIND_MAIN,    0, SG_CAP_MAIN | SG_CAP_IAT | SG_CAP_MAP | SG_CAP_MODE },
+  { 0x13, SG_KIND_MAIN,    1, SG_CAP_MAIN | SG_CAP_IAT | SG_CAP_MAP },
+  { 0x60, SG_KIND_MAIN,    0, SG_CAP_MAIN | SG_CAP_IAT | SG_CAP_MAP | SG_CAP_MODE },
+  { 0x61, SG_KIND_MAIN,    0, SG_CAP_MAIN | SG_CAP_IAT | SG_CAP_MAP | SG_CAP_MODE },
+  { 0x63, SG_KIND_MAIN,    1, SG_CAP_MAIN | SG_CAP_IAT | SG_CAP_MAP },
+  { 0x20, SG_KIND_O2,      0, SG_CAP_O2B1 },
+  { 0x70, SG_KIND_O2,      0, SG_CAP_O2B1 }, // alt table id for the same bank-1 O2 sensor
+  { 0x21, SG_KIND_O2,      1, SG_CAP_O2B2 },
+  { 0x71, SG_KIND_O2,      1, SG_CAP_O2B2 }, // alt table id for the same bank-2 O2 sensor
+  { 0xD1, SG_KIND_DIGITAL, 0, SG_CAP_DIGITAL },
+  { 0x00, SG_KIND_ECMCODE, 0, SG_CAP_ECMID }
+};
+
+#define SG_TABLE_COUNT ((uint8_t)(sizeof(SG_TABLES) / sizeof(SG_TABLES[0])))
+
+// Filled by sgProbeTables(): the tables that answered, and how they are polled.
+static int8_t sgPrimaryMain = -1; // SG_TABLES index polled most often (main sensors)
+static int8_t sgPrimaryO2 = -1;   // same, for the O2 bank 1 sensor
+static uint8_t sgRest[SG_TABLE_COUNT]; // every other working table, polled round-robin
+static uint8_t sgRestCount = 0;
+static uint8_t sgRestIdx = 0;
 
 static uint32_t sgConsecutiveFail = 0;
 static uint32_t sgLastConnectTryMs = 0;
 static uint32_t sgLastKLineCmdDoneMs = 0;
 static uint32_t sgReconnectNotBeforeMs = 0;
+
+static void sgProbeTables();
 
 static uint8_t sgPollStep = 0;
 static bool sgReconnectPending = false;
@@ -188,7 +262,7 @@ uint8_t sgKLineSendCapture(
 }
 
 // Generic "read live data table" request: 72 05 71 <tableId> <checksum>.
-// Shared by table 17/20 and the tables in SG_EXT_TABLE_IDS.
+// Shared by every table in SG_TABLES.
 static uint8_t sgReadLiveTable(
   uint8_t tableId,
   uint8_t *payload,
@@ -299,8 +373,6 @@ void sgScheduleReconnect(const char *reason) {
   );
 
   sgGauge.ecuConnected = false;
-  sgGauge.t17Ok = false;
-  sgGauge.t20Ok = false;
 
   sgConsecutiveFail = 0;
   sgPollStep = 0;
@@ -338,6 +410,8 @@ static void sgEnsureConnected() {
     Serial.println(
       "[ECU CONNECTED] Wave 110i/125i ECU Link Established"
     );
+
+    sgProbeTables();
   }
 }
 
@@ -345,57 +419,93 @@ static void sgEnsureConnected() {
 // WAVE DECODER
 // ============================================================================
 
+// FAST IDLE and MODE share one byte in tables 17/67: bit 7 set = fast idle off.
+static void sgSetSharedMode(uint8_t raw) {
+  sgGauge.ext.fastIdleOn = (raw < 0x80);
+  sgGauge.ext.mode = (raw < 0x80) ? raw : raw - 0x80;
+}
+
 // Table 17 follows the user-supplied PGM-FI layout: ECT=D14-40,
 // INJ=(D20*256+D21)/200. Earlier Wave code used offset 0x0B and /250;
 // validate these updated conversions separately before relying on Wave readings.
-static bool sgDecodeWaveMain() {
-  if (sgMainPayloadLen < 0x12) {
-    Serial.printf(
-      "[DECODE] T17 payload too short: %u\n",
-      sgMainPayloadLen
-    );
-
+static bool sgDecodeWaveMain(const uint8_t *p, uint8_t len) {
+  if (len < 0x14) {
     return false;
   }
 
-  sgGauge.rpm =
-    ((uint16_t)sgMainPayload[0x04] << 8) |
-    sgMainPayload[0x05];
+  sgGauge.rpm = ((uint16_t)p[0x04] << 8) | p[0x05];
+  sgGauge.tpsVolt = (float)p[0x06] * (5.0f / 256.0f);
+  sgGauge.tps = (float)p[0x07] * 0.5f;
+  sgGauge.tempC = (int16_t)p[0x09] - 40; // D14: ECT (D16 is not ECT)
+  sgGauge.batteryV = (float)p[0x0E] / 10.0f;
+  sgGauge.injectorMs = (float)(((uint16_t)p[0x0F] << 8) | p[0x10]) / 200.0f; // (D20*256+D21)/200
+  sgGauge.ignitionDeg = ((float)p[0x11] / 2.0f) - 64.0f;
+  sgGauge.speedKmh = p[0x13]; // D24
 
-  sgGauge.tpsVolt =
-    (float)sgMainPayload[0x06] *
-    (5.0f / 256.0f);
+  sgGauge.ext.eotVolt = (float)p[0x0C] * (5.0f / 256.0f); // D17
+  sgGauge.ext.eotTempC = (int16_t)p[0x0D] - 40;           // D18
+  sgSetSharedMode(p[0x12]);                               // D23
+  sgGauge.ext.ok = true;
 
-  sgGauge.tps =
-    (float)sgMainPayload[0x07] * 0.5f;
+  return true;
+}
 
-  sgGauge.tempC =
-    (int16_t)sgMainPayload[0x09] - 40; // D14: ECT (D16 is not ECT)
-
-  sgGauge.batteryV =
-    (float)sgMainPayload[0x0E] / 10.0f;
-
-  const uint16_t rawInj =
-    ((uint16_t)sgMainPayload[0x0F] << 8) |
-    sgMainPayload[0x10];
-
-  sgGauge.injectorMs =
-    (float)rawInj / 200.0f; // Table 17: (D20 * 256 + D21) / 200
-
-  sgGauge.ignitionDeg =
-    ((float)sgMainPayload[0x11] / 2.0f) -
-    64.0f;
-
-  if (sgMainPayloadLen > 0x13) {
-    sgGauge.speedKmh = sgMainPayload[0x13]; // D24, PGMFI HONDA.pdf table 17
-
-    sgGauge.ext.eotTempC = (int16_t)sgMainPayload[0x0D] - 40; // D18: EOT
-    sgGauge.ext.fastIdleOn = (sgMainPayload[0x12] < 0x80);    // D23 < 128 = fast idle ON
-    sgGauge.ext.mode = (sgMainPayload[0x12] < 0x80)
-      ? sgMainPayload[0x12]
-      : sgMainPayload[0x12] - 0x80;
-    sgGauge.ext.ok = true;
+// PDF-accurate decode for tables 10/11/13/60/61/63/67 (SG_MAIN_LAYOUTS).
+static bool sgDecodeMainLayout(const uint8_t *payload, uint8_t len, uint8_t layoutIdx) {
+  if (len < 10) {
+    sgGauge.ext.ok = false;
+    return false;
   }
+
+  const SgMainLayout &lay = SG_MAIN_LAYOUTS[layoutIdx];
+
+  sgGauge.rpm = ((uint16_t)payload[4] << 8) | payload[5];
+  sgGauge.tpsVolt = (float)payload[6] * (5.0f / 256.0f);
+  sgGauge.tps = (float)payload[7] * 0.5f;
+  sgGauge.tempC = (int16_t)payload[9] - 40;
+
+  if (lay.iatVOff != SG_OFF_NONE && lay.iatCOff < len) {
+    sgGauge.ext.iatVolt = (float)payload[lay.iatVOff] * (5.0f / 256.0f);
+    sgGauge.ext.iatTempC = (int16_t)payload[lay.iatCOff] - 40;
+  }
+
+  if (lay.mapVOff != SG_OFF_NONE && lay.mapKpaOff < len) {
+    sgGauge.ext.mapVolt = (float)payload[lay.mapVOff] * (5.0f / 256.0f);
+    sgGauge.ext.mapKpa = payload[lay.mapKpaOff];
+  }
+
+  if (lay.eotVOff != SG_OFF_NONE && lay.eotCOff < len) {
+    sgGauge.ext.eotVolt = (float)payload[lay.eotVOff] * (5.0f / 256.0f);
+    sgGauge.ext.eotTempC = (int16_t)payload[lay.eotCOff] - 40;
+  }
+
+  if (lay.batOff < len) {
+    sgGauge.batteryV = (float)payload[lay.batOff] * 0.1f;
+  }
+
+  if ((uint16_t)lay.injOff + 1 < len) {
+    const uint16_t rawInj =
+      ((uint16_t)payload[lay.injOff] << 8) | payload[lay.injOff + 1];
+    sgGauge.injectorMs = (float)rawInj / 200.0f;
+  }
+
+  if (lay.igtOff < len) {
+    sgGauge.ignitionDeg = -64.0f + ((float)payload[lay.igtOff] * 0.5f);
+  }
+
+  if (lay.modeOff != SG_OFF_NONE && lay.modeOff < len) {
+    if (layoutIdx == 2) {
+      sgSetSharedMode(payload[lay.modeOff]);
+    } else {
+      sgGauge.ext.mode = payload[lay.modeOff]; // layout A: plain MODE byte, no fast-idle bit
+    }
+  }
+
+  if (lay.speedOff < len) {
+    sgGauge.speedKmh = payload[lay.speedOff];
+  }
+
+  sgGauge.ext.ok = true;
 
   return true;
 }
@@ -443,118 +553,145 @@ static bool sgDecodeO2Bank(const uint8_t *payload, uint8_t len, uint8_t bank) {
   return true;
 }
 
-static bool sgDecodeWaveAux() {
-  if (sgAuxPayloadLen <= 0x04) {
-    Serial.printf(
-      "[DECODE] T20 payload too short: %u\n",
-      sgAuxPayloadLen
-    );
-
-    sgGauge.o2[0].ok = false;
-
-    return false;
-  }
-
-  return sgDecodeO2Bank(sgAuxPayload, sgAuxPayloadLen, 0);
-}
-
 // ============================================================================
-// TABLE 17 / TABLE 20 / EXTENDED TABLES
+// LIVE-DATA TABLES: read, probe, poll
 // ============================================================================
 
-static bool sgReadTable17() {
-  sgMainPayloadLen = sgReadLiveTable(
-    0x17,
-    sgMainPayload,
-    SG_MAIN_PAYLOAD_MAX,
-    SG_T17_TIMEOUT_MS
-  );
-
-  if (sgMainPayloadLen == 0) {
-    if (++sgConsecutiveFail >= 5) {
-      sgScheduleReconnect("T17 FAIL");
-    }
-
-    return false;
-  }
-
-  if (!sgDecodeWaveMain()) {
-    if (++sgConsecutiveFail >= 5) {
-      sgScheduleReconnect("T17 DECODE FAIL");
-    }
-
-    return false;
-  }
-
-  sgGauge.t17Ok = true;
-  sgConsecutiveFail = 0;
-
-  return true;
-}
-
-static bool sgReadTable20() {
-  sgAuxPayloadLen = sgReadLiveTable(
-    0x20,
-    sgAuxPayload,
-    SG_AUX_PAYLOAD_MAX,
-    SG_T20_TIMEOUT_MS
-  );
-
-  if (sgAuxPayloadLen == 0) {
-    if (++sgConsecutiveFail >= 5) {
-      sgScheduleReconnect("T20 FAIL");
-    }
-
-    return false;
-  }
-
-  if (!sgDecodeWaveAux()) {
-    if (++sgConsecutiveFail >= 5) {
-      sgScheduleReconnect("T20 DECODE FAIL");
-    }
-
-    return false;
-  }
-
-  sgGauge.t20Ok = true;
-  sgConsecutiveFail = 0;
-
-  return true;
-}
-
-// Extended live-data tables (SG_EXT_TABLE_IDS).
-static bool sgReadExtTable(uint8_t tableId) {
+// Reads one table and decodes it into sgGauge. False = no reply, a "no data"
+// reply (table not supported by this ECU) or a payload that doesn't decode.
+static bool sgReadTable(const SgLiveTable &table) {
   uint8_t payload[SG_MAIN_PAYLOAD_MAX];
 
   const uint8_t len = sgReadLiveTable(
-    tableId,
+    table.id,
     payload,
     sizeof(payload),
     SG_T17_TIMEOUT_MS
   );
 
-  if (len == 0) {
+  if (len <= 4) {
     return false;
   }
 
-  return (tableId == 0x00)
-    ? sgDecodeEcmCode(payload, len)
-    : sgDecodeDigitalStatus(payload, len);
+  switch (table.kind) {
+    case SG_KIND_WAVE17:
+      return sgDecodeWaveMain(payload, len);
+
+    case SG_KIND_MAIN:
+      return sgDecodeMainLayout(payload, len, table.variant);
+
+    case SG_KIND_O2:
+      return sgDecodeO2Bank(payload, len, table.variant);
+
+    case SG_KIND_ECMCODE:
+      return sgDecodeEcmCode(payload, len);
+
+    case SG_KIND_DIGITAL:
+    default:
+      return sgDecodeDigitalStatus(payload, len);
+  }
 }
 
-static void sgPollExtTable() {
-  sgReadExtTable(SG_EXT_TABLE_IDS[sgExtIndex]);
+// Called right after a successful wakeup (bus lock held by the K-line task):
+// ask the ECU for every known table once, keep the ones that answer, and publish
+// what they provide in sgGauge.support so the screen only shows real data.
+static void sgProbeTables() {
+  sgGauge.ext = ExtSensors();
+  sgGauge.o2[0] = O2Bank();
+  sgGauge.o2[1] = O2Bank();
+  sgGauge.digital = DigitalStatus();
+  sgGauge.ecmCodeOk = false;
 
-  sgExtIndex = (sgExtIndex + 1) % SG_EXT_TABLE_COUNT;
+  uint16_t caps = 0;
+  bool answered[SG_TABLE_COUNT];
+
+  sgPrimaryMain = -1;
+  sgPrimaryO2 = -1;
+  sgRestCount = 0;
+  sgRestIdx = 0;
+
+  for (uint8_t i = 0; i < SG_TABLE_COUNT; ++i) {
+    answered[i] = sgReadTable(SG_TABLES[i]);
+
+    delay(SG_KLINE_GAP_MS);
+
+    if (!answered[i]) {
+      continue;
+    }
+
+    caps |= SG_TABLES[i].caps;
+
+    if (sgPrimaryMain < 0 && (SG_TABLES[i].caps & SG_CAP_MAIN)) {
+      sgPrimaryMain = i;
+    } else if (sgPrimaryO2 < 0 && (SG_TABLES[i].caps & SG_CAP_O2B1)) {
+      sgPrimaryO2 = i;
+    } else {
+      sgRest[sgRestCount++] = i;
+    }
+  }
+
+  Serial.print("[PROBE] tables answering:");
+
+  for (uint8_t i = 0; i < SG_TABLE_COUNT; ++i) {
+    if (answered[i]) {
+      Serial.printf(" %02X", SG_TABLES[i].id);
+    }
+  }
+
+  Serial.println(caps == 0 ? " none" : "");
+
+  if (caps == 0) {
+    // Probably a bad link rather than an ECU with no tables: retry from the wakeup.
+    sgScheduleReconnect("PROBE: NO TABLE ANSWERED");
+    return;
+  }
+
+  TableSupport &sup = sgGauge.support;
+
+  sup.main    = (caps & SG_CAP_MAIN) != 0;
+  sup.iat     = (caps & SG_CAP_IAT) != 0;
+  sup.map     = (caps & SG_CAP_MAP) != 0;
+  sup.eot     = (caps & SG_CAP_EOT) != 0;
+  sup.mode    = (caps & SG_CAP_MODE) != 0;
+  sup.o2b1    = (caps & SG_CAP_O2B1) != 0;
+  sup.o2b2    = (caps & SG_CAP_O2B2) != 0;
+  sup.digital = (caps & SG_CAP_DIGITAL) != 0;
+  sup.ecmId   = (caps & SG_CAP_ECMID) != 0;
+  sup.probed  = true;
 }
 
-// Serial 's': ask the ECU for every known live table once and print the raw
+static void sgPollNext() {
+  int8_t pick = -1;
+
+  if (sgPollStep == 0) {
+    pick = sgPrimaryMain;
+  } else if (sgPollStep == 1) {
+    pick = sgPrimaryO2;
+  }
+
+  if (pick < 0 && sgRestCount > 0) {
+    pick = sgRest[sgRestIdx];
+    sgRestIdx = (sgRestIdx + 1) % sgRestCount;
+  }
+
+  if (pick < 0) {
+    pick = (sgPrimaryMain >= 0) ? sgPrimaryMain : sgPrimaryO2;
+  }
+
+  if (pick < 0) {
+    return;
+  }
+
+  if (sgReadTable(SG_TABLES[pick])) {
+    sgConsecutiveFail = 0;
+  } else if (++sgConsecutiveFail >= 5) {
+    sgScheduleReconnect("TABLE READ FAIL");
+  }
+}
+
+// Serial 's': ask the ECU for every known table once and print the raw
 // payload, so you can see which tables your ECU actually answers.
 void sgScanLiveTables() {
-  static const uint8_t ids[] = {
-    0x00, 0x10, 0x11, 0x13, 0x17, 0x20, 0x21, 0x60, 0x61, 0x63, 0x67, 0x70, 0x71, 0xD1
-  };
-
   if (!sgGauge.ecuConnected) {
     Serial.println("[SCAN] ECU not connected yet");
     return;
@@ -562,12 +699,12 @@ void sgScanLiveTables() {
 
   sgBusLock();
 
-  for (uint8_t i = 0; i < sizeof(ids); ++i) {
+  for (uint8_t i = 0; i < SG_TABLE_COUNT; ++i) {
     uint8_t payload[SG_MAIN_PAYLOAD_MAX];
 
-    const uint8_t len = sgReadLiveTable(ids[i], payload, sizeof(payload), SG_T17_TIMEOUT_MS);
+    const uint8_t len = sgReadLiveTable(SG_TABLES[i].id, payload, sizeof(payload), SG_T17_TIMEOUT_MS);
 
-    Serial.printf("[SCAN] T%02X ", ids[i]);
+    Serial.printf("[SCAN] T%02X ", SG_TABLES[i].id);
 
     if (len == 0) {
       Serial.println("no valid reply");
@@ -607,11 +744,7 @@ void sgEngineTask() {
     return;
   }
 
-  switch (sgPollStep) {
-    case 0:  sgReadTable17(); break;
-    case 1:  sgReadTable20(); break;
-    default: sgPollExtTable(); break;
-  }
+  sgPollNext();
 
   sgPollStep =
     (sgPollStep + 1) % 3;
