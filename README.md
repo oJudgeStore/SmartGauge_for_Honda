@@ -72,7 +72,8 @@ calibration.
 
 - Built around the Wave 110i/125i ECU. Other PGM-FI ECUs use the same protocol but some values (temperatures,
   injector time) may be scaled differently.
-- The K-line wiring, live data and DTC read/clear have only been tested on a bench ECU, not yet on a bike.
+- Live data and DTC read are confirmed working on the board against an ECU on the bench. DTC clear and use on a
+  running bike have not been verified yet.
 - Use at your own risk. Do not rely on it for safety-critical decisions.
 
 ## Credits
