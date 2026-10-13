@@ -1,0 +1,544 @@
+#include "Gui.h"
+
+#include <stdio.h>
+#include <string.h>
+#include <Arduino.h>
+
+// GUI : LVGL widgets rendered onto the onboard TFT via TFT_eSPI (install
+//       "TFT_eSPI" by Bodmer AND "lvgl" from the Arduino Library Manager --
+//       neither is vendored in this repo). TFT_eSPI still owns the actual
+//       pixel push (LVGL's flush callback below just calls pushPixels() --
+//       LV_COLOR_DEPTH 16 in lv_conf.h, see that file's note on why 8-bit
+//       RGB332 was tried and reverted) and the XPT2046 touch read (LVGL's
+//       indev read callback calls getTouch());
+//       LVGL only owns layout/widgets/redraw scheduling on top of that.
+//       The #define USER_SETUP_LOADED below only configures THIS .cpp's own
+//       compilation; TFT_eSPI.cpp is a separate translation unit and does
+//       NOT see it, so Setup_CYD_3248S035.h must ALSO be installed into the
+//       library itself (User_Setups/ + User_Setup_Select.h) -- see README
+//       "Setup". lv_conf.h needs the equivalent one-time step for lvgl --
+//       see that file's header comment.
+#define USER_SETUP_LOADED 1
+#include "Setup_CYD_3248S035.h"
+#include <TFT_eSPI.h>
+#include <lvgl.h>
+#include <Preferences.h> // bundled with the ESP32 core -- stores touch calibration in NVS
+#include "BgImage_oJudge.h" // generated RGB332 (8-bit) watermark, see that file's header comment
+
+#include "Protocol.h"
+#include "Dtc.h"
+
+TFT_eSPI sgTft = TFT_eSPI();
+Preferences sgPrefs;
+
+// Root cause of every "colors look wrong" report found and fixed: a 16-bit
+// byte-swap in the pixel data reaching the panel, NOT a channel-order issue
+// -- see sgGuiInit()'s setSwapBytes(true) call and its comment. Color's back.
+#define SG_GUI_BG      lv_color_black()
+#define SG_GUI_LABEL   lv_color_hex(0x808080)
+#define SG_GUI_VALUE   lv_color_white()
+#define SG_GUI_OK      lv_color_hex(0x00FF00)
+#define SG_GUI_WARN    lv_color_hex(0xFF0000)
+#define SG_GUI_BTN     lv_color_hex(0x000080)
+
+// Page 0: table 17/20 fields (the fast-polled primary gauges), plus MAP
+// (moved here from page 1, though it's still sourced from the slow-polled
+// extended tables like the rest of page 1 -- see the "--" caveat below).
+// Page 1: everything else that was previously Serial-only -- tables
+// 10/11/13/60/61/63/67 (IAT/EOT/MODE), 21/71 (O2 bank2), D1 (gear/fuel
+// pump/cooling fan), 00 (ECM ID).
+// Page 2: DTC read/clear, driven by two on-screen touch buttons.
+// Pages are switched by double-tapping anywhere on the screen (no auto-cycle),
+// detected in the LVGL touchpad read callback so it still fires even when the
+// tap also lands on a button -- see sgGuiTouchReadCb().
+#define SG_GUI_PAGE_COUNT     3
+#define SG_GUI_PAGE_DTC       2
+#define SG_GUI_DOUBLE_TAP_MS  400
+
+// Button/row hit-boxes (x, y, w, h) -- unchanged from the direct-draw layout,
+// now just lv_obj position/size instead of fillRoundRect() coordinates.
+static const int16_t SG_GUI_BTN_READ[4]  = { 10, 280, 300, 40 };
+static const int16_t SG_GUI_BTN_CLEAR[4] = { 10, 330, 300, 40 };
+
+static uint8_t sgGuiPage = 0;
+static lv_obj_t *sgGuiPageObj[SG_GUI_PAGE_COUNT];
+
+// Page 0/1 widgets that sgGuiUpdate() refreshes from sgGauge every tick.
+static struct {
+  lv_obj_t *status;
+  lv_obj_t *rpm, *tps, *temp, *bat, *inj, *ign, *speed, *o2, *mapKpa;
+} sgP0;
+
+static struct {
+  lv_obj_t *status;
+  lv_obj_t *iat, *eot, *mode, *o2b2, *gear, *fuelPump, *coolFan, *ecmId;
+} sgP1;
+
+// 8 rows x 26 px fit between the caption (y=35) and the status line (y=250);
+// the status text shows the full count, Serial lists all 12.
+#define SG_GUI_DTC_ROWS 8
+
+static struct {
+  lv_obj_t *lines[SG_GUI_DTC_ROWS];
+  lv_obj_t *status;
+} sgDtcUi;
+
+// ---------------------------------------------------------------------------
+// LVGL <-> TFT_eSPI glue
+// ---------------------------------------------------------------------------
+
+static void sgLvglFlushCb(lv_display_t *disp, const lv_area_t *area, uint8_t *pxMap) {
+  const uint32_t w = area->x2 - area->x1 + 1;
+  const uint32_t h = area->y2 - area->y1 + 1;
+
+  sgTft.startWrite();
+  sgTft.setAddrWindow(area->x1, area->y1, w, h);
+  sgTft.pushPixels((uint16_t *)pxMap, w * h);
+  sgTft.endWrite();
+
+  lv_display_flush_ready(disp);
+}
+
+static bool sgGuiTouchWasDown = false;
+static uint32_t sgGuiLastTapMs = 0;
+
+static void sgGuiGotoPage(uint8_t page) {
+  lv_obj_add_flag(sgGuiPageObj[sgGuiPage], LV_OBJ_FLAG_HIDDEN);
+  sgGuiPage = page;
+  lv_obj_clear_flag(sgGuiPageObj[sgGuiPage], LV_OBJ_FLAG_HIDDEN);
+}
+
+// Feeds real touch data to LVGL (so widgets/buttons on the current page still
+// get their own click events) AND separately detects the double-tap-anywhere
+// page switch -- both look at the same tap-down edge, so a double-tap landing
+// on a button both fires the button (first tap) and advances the page
+// (second), same accepted quirk as the old direct-draw version.
+static void sgGuiTouchReadCb(lv_indev_t *indev, lv_indev_data_t *data) {
+  uint16_t tx, ty;
+  const bool touched = sgTft.getTouch(&tx, &ty);
+
+  data->state = touched ? LV_INDEV_STATE_PRESSED : LV_INDEV_STATE_RELEASED;
+  if (touched) {
+    data->point.x = tx;
+    data->point.y = ty;
+  }
+
+  const bool tapEdge = touched && !sgGuiTouchWasDown;
+  sgGuiTouchWasDown = touched;
+
+  if (!tapEdge) {
+    return;
+  }
+
+  const uint32_t now = millis();
+
+  if (now - sgGuiLastTapMs <= SG_GUI_DOUBLE_TAP_MS) {
+    sgGuiGotoPage((sgGuiPage + 1) % SG_GUI_PAGE_COUNT);
+    sgGuiLastTapMs = 0; // consumed -- a 3rd tap starts a fresh window, not a chain
+  } else {
+    sgGuiLastTapMs = now;
+  }
+}
+
+// Touch calibration data persists in NVS (ESP32 Preferences) so it only needs
+// doing once per physical unit, not once per power-on. Runs before lv_init(),
+// straight against TFT_eSPI -- no LVGL widgets needed for a one-off screen.
+static void sgGuiTouchInit(bool force) {
+  uint16_t calData[5];
+
+  sgPrefs.begin("kline", false);
+
+  const size_t got = sgPrefs.getBytes("tcal", calData, sizeof(calData));
+
+  if (force || got != sizeof(calData)) {
+    sgTft.fillScreen(TFT_BLACK);
+    sgTft.setTextColor(TFT_WHITE, TFT_BLACK);
+    sgTft.setTextFont(2);
+    sgTft.drawString("Touch each crosshair to calibrate", 30, 150);
+    sgTft.calibrateTouch(calData, TFT_WHITE, TFT_BLACK, 20);
+    sgPrefs.putBytes("tcal", calData, sizeof(calData));
+  }
+
+  sgTft.setTouch(calData);
+}
+
+// Serial 't' -- redo the calibration on a unit that already has one stored
+// (drifted panel, replaced screen). calibrateTouch() blocks and draws straight
+// to the TFT behind LVGL's back, so invalidate the whole screen afterwards to
+// let the next lv_timer_handler() repaint over its crosshairs.
+void sgGuiCalibrateTouch() {
+  sgGuiTouchInit(true);
+  sgGuiTouchWasDown = false; // don't let the last crosshair tap read as a page-switch edge
+  lv_obj_invalidate(lv_screen_active());
+}
+
+// Watermark, same on every page, flush to the bottom-right corner -- drawn
+// straight via TFT_eSPI rather than as an LVGL image object. ponytail: LVGL's
+// image descriptor layout isn't stable across v8/v9, and this corner never
+// overlaps a widget, so redrawing it directly each throttled tick (matching
+// the old cadence) sidesteps that entirely instead of chasing whichever LVGL
+// major version actually lands on top of `lvgl` from the Library Manager.
+static void sgGuiDrawBackground() {
+  // sgBgImage is 8-bit RGB332 (see BgImage_oJudge.h) -- the `true` selects
+  // TFT_eSPI's bpp8 pushImage() overload instead of its 16-bit RGB565 one.
+  sgTft.pushImage(SG_BG_IMG_X, SG_BG_IMG_Y, SG_BG_IMG_W, SG_BG_IMG_H, sgBgImage, true);
+}
+
+// ---------------------------------------------------------------------------
+// Widget builders
+// ---------------------------------------------------------------------------
+
+static lv_obj_t *sgGuiMakePage() {
+  lv_obj_t *page = lv_obj_create(lv_screen_active());
+  lv_obj_remove_style_all(page);
+  lv_obj_set_size(page, LV_PCT(100), LV_PCT(100));
+  lv_obj_clear_flag(page, LV_OBJ_FLAG_SCROLLABLE);
+  return page;
+}
+
+// ponytail: tried faking a bold weight here (lvgl ships no bold Montserrat)
+// by stacking a twin label 1px to the right -- reverted, it read as a
+// horizontal smear/blur rather than bold, and cost DRAM we don't have to
+// spare (see lv_conf.h's LV_MEM_SIZE note). sgGuiSetText() is now a plain
+// pass-through, kept only so call sites don't all need renaming back.
+static lv_obj_t *sgGuiAddText(lv_obj_t *parent, int16_t x, int16_t y, const lv_font_t *font, lv_color_t color, const char *text) {
+  lv_obj_t *lbl = lv_label_create(parent);
+  lv_label_set_text(lbl, text);
+  lv_obj_set_style_text_font(lbl, font, 0);
+  lv_obj_set_style_text_color(lbl, color, 0);
+  lv_obj_set_pos(lbl, x, y);
+  return lbl;
+}
+
+static void sgGuiSetText(lv_obj_t *label, const char *text) {
+  lv_label_set_text(label, text);
+}
+
+static lv_obj_t *sgGuiAddCaption(lv_obj_t *parent, int16_t x, int16_t y, const char *text) {
+  return sgGuiAddText(parent, x, y, &lv_font_montserrat_22, SG_GUI_LABEL, text);
+}
+
+static lv_obj_t *sgGuiAddValue(lv_obj_t *parent, int16_t x, int16_t y, const lv_font_t *font) {
+  return sgGuiAddText(parent, x, y, font, SG_GUI_VALUE, "--");
+}
+
+static lv_obj_t *sgGuiAddButton(lv_obj_t *parent, const int16_t box[4], const char *text, lv_event_cb_t cb) {
+  lv_obj_t *btn = lv_button_create(parent);
+  lv_obj_set_pos(btn, box[0], box[1]);
+  lv_obj_set_size(btn, box[2], box[3]);
+  lv_obj_set_style_bg_color(btn, SG_GUI_BTN, 0);
+  lv_obj_set_style_border_color(btn, lv_color_white(), 0);
+  lv_obj_set_style_border_width(btn, 2, 0);
+  lv_obj_set_style_radius(btn, 6, 0);
+  lv_obj_add_event_cb(btn, cb, LV_EVENT_CLICKED, NULL);
+
+  lv_obj_t *label = lv_label_create(btn);
+  lv_label_set_text(label, text);
+  lv_obj_set_style_text_color(label, lv_color_white(), 0);
+  lv_obj_center(label);
+
+  return btn;
+}
+
+static void sgGuiAddPageNumber(lv_obj_t *parent, uint8_t page) {
+  char buf[4];
+  snprintf(buf, sizeof(buf), "%u/%u", page + 1, SG_GUI_PAGE_COUNT);
+  sgGuiAddCaption(parent, 280, 10, buf);
+}
+
+// ---------------------------------------------------------------------------
+// Page 0/1: gauge/sensor field labels
+// ---------------------------------------------------------------------------
+
+static void sgGuiBuildPage0(lv_obj_t *page) {
+  sgGuiAddCaption(page, 10,  10, "RPM");
+  sgGuiAddCaption(page, 10, 105, "TPS");
+  sgGuiAddCaption(page, 170, 105, "TEMP");
+  sgGuiAddCaption(page, 10, 180, "BAT");
+  sgGuiAddCaption(page, 170, 180, "INJ");
+  sgGuiAddCaption(page, 10, 255, "IGN");
+  sgGuiAddCaption(page, 170, 255, "SPEED");
+  sgGuiAddCaption(page, 10, 330, "O2");
+  sgGuiAddCaption(page, 170, 330, "MAP");
+  sgGuiAddPageNumber(page, 0);
+
+  sgP0.status = sgGuiAddText(page, 10, 390, &lv_font_montserrat_22, SG_GUI_WARN, "CONNECTING...");
+
+  sgP0.rpm    = sgGuiAddValue(page, 10, 30, &lv_font_montserrat_48);
+  sgP0.tps    = sgGuiAddValue(page, 10, 127, &lv_font_montserrat_34);
+  sgP0.temp   = sgGuiAddValue(page, 170, 127, &lv_font_montserrat_34);
+  sgP0.bat    = sgGuiAddValue(page, 10, 202, &lv_font_montserrat_34);
+  sgP0.inj    = sgGuiAddValue(page, 170, 202, &lv_font_montserrat_34);
+  sgP0.ign    = sgGuiAddValue(page, 10, 277, &lv_font_montserrat_34);
+  sgP0.speed  = sgGuiAddValue(page, 170, 277, &lv_font_montserrat_34);
+  sgP0.o2     = sgGuiAddValue(page, 10, 352, &lv_font_montserrat_34);
+  sgP0.mapKpa = sgGuiAddValue(page, 170, 352, &lv_font_montserrat_34);
+}
+
+static void sgGuiBuildPage1(lv_obj_t *page) {
+  sgGuiAddCaption(page, 10, 20, "IAT");
+  sgGuiAddCaption(page, 10, 95, "EOT");
+  sgGuiAddCaption(page, 170, 95, "MODE");
+  sgGuiAddCaption(page, 10, 170, "O2 BANK2");
+  sgGuiAddCaption(page, 170, 170, "GEAR/BANK");
+  sgGuiAddCaption(page, 10, 245, "FUEL PUMP");
+  sgGuiAddCaption(page, 170, 245, "COOL FAN");
+  sgGuiAddCaption(page, 10, 320, "ECM ID");
+  sgGuiAddPageNumber(page, 1);
+
+  sgP1.status = sgGuiAddText(page, 10, 390, &lv_font_montserrat_22, SG_GUI_WARN, "CONNECTING...");
+
+  sgP1.iat      = sgGuiAddValue(page, 10, 42, &lv_font_montserrat_34);
+  sgP1.eot      = sgGuiAddValue(page, 10, 117, &lv_font_montserrat_34);
+  sgP1.mode     = sgGuiAddValue(page, 170, 117, &lv_font_montserrat_34);
+  sgP1.o2b2     = sgGuiAddValue(page, 10, 192, &lv_font_montserrat_34);
+  sgP1.gear     = sgGuiAddValue(page, 170, 192, &lv_font_montserrat_34);
+  sgP1.fuelPump = sgGuiAddValue(page, 10, 267, &lv_font_montserrat_34);
+  sgP1.coolFan  = sgGuiAddValue(page, 170, 267, &lv_font_montserrat_34);
+  sgP1.ecmId    = sgGuiAddValue(page, 10, 342, &lv_font_montserrat_34);
+}
+
+// ---------------------------------------------------------------------------
+// Page 2: DTC read/clear
+// ---------------------------------------------------------------------------
+
+static char sgDtcStatusMsg[40] = "Tap READ to scan";
+
+static void sgGuiRedrawDtcStatus() {
+  sgGuiSetText(sgDtcUi.status, sgDtcStatusMsg);
+  lv_refr_now(NULL); // force immediate paint -- sgDtcRead()/sgDtcClear() below block for ~1s
+}
+
+static void sgGuiOnReadDtc(lv_event_t *e) {
+  if (sgGauge.rpm > 0) {
+    strcpy(sgDtcStatusMsg, "Engine running - refused");
+    sgGuiRedrawDtcStatus();
+    return;
+  }
+
+  strcpy(sgDtcStatusMsg, "Reading...");
+  sgGuiRedrawDtcStatus();
+  if (sgDtcRead()) {
+    snprintf(sgDtcStatusMsg, sizeof(sgDtcStatusMsg), "%u DTC found", sgDtc.count);
+  } else {
+    strcpy(sgDtcStatusMsg, "Read FAILED");
+  }
+  sgGuiRedrawDtcStatus();
+}
+
+static void sgGuiOnClearDtc(lv_event_t *e) {
+  if (sgGauge.rpm > 0) {
+    strcpy(sgDtcStatusMsg, "Engine running - refused");
+    sgGuiRedrawDtcStatus();
+    return;
+  }
+
+  strcpy(sgDtcStatusMsg, "Clearing...");
+  sgGuiRedrawDtcStatus();
+  strcpy(sgDtcStatusMsg, sgDtcClear() ? "Cleared" : "Clear FAILED");
+  sgGuiRedrawDtcStatus();
+}
+
+static void sgGuiBuildPageDtc(lv_obj_t *page) {
+  sgGuiAddCaption(page, 10, 10, "DTC READ / CLEAR");
+  sgGuiAddPageNumber(page, SG_GUI_PAGE_DTC);
+  sgGuiAddButton(page, SG_GUI_BTN_READ, "READ DTC", sgGuiOnReadDtc);
+  sgGuiAddButton(page, SG_GUI_BTN_CLEAR, "CLEAR DTC", sgGuiOnClearDtc);
+
+  for (uint8_t i = 0; i < SG_GUI_DTC_ROWS; ++i) {
+    sgDtcUi.lines[i] = sgGuiAddText(page, 10, 35 + i * 26, &lv_font_montserrat_22, SG_GUI_VALUE, "");
+    lv_obj_set_width(sgDtcUi.lines[i], 300);
+    lv_label_set_long_mode(sgDtcUi.lines[i], LV_LABEL_LONG_CLIP);
+  }
+
+  sgDtcUi.status = sgGuiAddText(page, 10, 250, &lv_font_montserrat_22, SG_GUI_VALUE, sgDtcStatusMsg);
+}
+
+// Called from sgGuiUpdate() so sgDtc.lines[] (populated by sgDtcRead(), from
+// either a tap or the Serial 'r'/'c' commands) gets picked up either way.
+static void sgGuiRefreshDtcPage() {
+  for (uint8_t i = 0; i < SG_GUI_DTC_ROWS; ++i) {
+    sgGuiSetText(sgDtcUi.lines[i], i < sgDtc.count ? sgDtc.shortLines[i] : "");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+
+void sgGuiInit() {
+  sgTft.init();
+  sgTft.setRotation(0); // portrait, 320x480 -- flip to setRotation(2) if this
+                        // comes up upside-down on your physical unit
+  // The actual root cause of every "colors look wrong" report so far: LVGL's
+  // raw RGB565 pixel buffer (sgLvglFlushCb's pxMap) is byte-swapped relative
+  // to what pushPixels() expects by default (_swapBytes = false). It's a
+  // 16-bit endianness bug, not a channel-order one -- confirmed by matching
+  // a byte-swap simulation exactly against reported swatch colors (red->blue,
+  // green->pink, blue->green, yellow->magenta, white unaffected since 0x0000/
+  // 0xFFFF survive a byte swap). TFT_RGB_ORDER was the wrong thing to chase.
+  sgTft.setSwapBytes(true);
+  sgGuiTouchInit(false);
+
+  lv_init();
+
+  static lv_color_t buf1[TFT_WIDTH * 40];
+  lv_display_t *disp = lv_display_create(TFT_WIDTH, TFT_HEIGHT);
+  lv_display_set_flush_cb(disp, sgLvglFlushCb);
+  lv_display_set_buffers(disp, buf1, NULL, sizeof(buf1), LV_DISPLAY_RENDER_MODE_PARTIAL);
+  // Hard pixel edges, no blended/grey fringing on text or shapes -- lvgl
+  // defaults this ON at LV_COLOR_DEPTH 16 (our setting), so this explicit
+  // call is what's actually turning it off. (Font
+  // horizontal-subpixel rendering, lv_font_subpx_t's LV_FONT_SUBPX_HOR, is a
+  // separate, per-font thing baked in at font-generation time -- the built-in
+  // Montserrat fonts we use were never built with it, so there's nothing
+  // active to disable there.)
+  lv_display_set_antialiasing(disp, false);
+
+  lv_indev_t *indev = lv_indev_create();
+  lv_indev_set_type(indev, LV_INDEV_TYPE_POINTER);
+  lv_indev_set_read_cb(indev, sgGuiTouchReadCb);
+
+  lv_obj_set_style_bg_color(lv_screen_active(), SG_GUI_BG, 0);
+  lv_obj_set_style_bg_opa(lv_screen_active(), LV_OPA_COVER, 0);
+
+  sgGuiPageObj[0] = sgGuiMakePage();
+  sgGuiBuildPage0(sgGuiPageObj[0]);
+
+  sgGuiPageObj[1] = sgGuiMakePage();
+  sgGuiBuildPage1(sgGuiPageObj[1]);
+  lv_obj_add_flag(sgGuiPageObj[1], LV_OBJ_FLAG_HIDDEN);
+
+  sgGuiPageObj[SG_GUI_PAGE_DTC] = sgGuiMakePage();
+  sgGuiBuildPageDtc(sgGuiPageObj[SG_GUI_PAGE_DTC]);
+  lv_obj_add_flag(sgGuiPageObj[SG_GUI_PAGE_DTC], LV_OBJ_FLAG_HIDDEN);
+}
+
+// Drives LVGL's tick + timer/render/touch handling. Unthrottled (call every
+// loop() iteration, every ~5-10ms) -- a full tap-down/up/tap-down double-tap
+// cycle often finishes inside 200-300ms, so gating this behind the ~200ms
+// value-refresh throttle in sgGuiUpdate() (as the old direct-draw touch
+// polling used to) made it easy to miss one or both press edges entirely.
+void sgGuiPollTouch() {
+  static uint32_t lastMs = 0;
+  const uint32_t now = millis();
+
+  lv_tick_inc(now - lastMs);
+  lastMs = now;
+
+  lv_timer_handler();
+}
+
+void sgGuiUpdate() {
+  static uint32_t lastMs = 0;
+  const uint32_t now = millis();
+
+  if (now - lastMs < 200) {
+    return;
+  }
+
+  lastMs = now;
+
+  sgGuiDrawBackground();
+
+  if (sgGuiPage == SG_GUI_PAGE_DTC) {
+    sgGuiRefreshDtcPage();
+    return;
+  }
+
+  lv_obj_t *statusLbl = (sgGuiPage == 0) ? sgP0.status : sgP1.status;
+  sgGuiSetText(statusLbl, sgGauge.ecuConnected ? "ECU CONNECTED" : "CONNECTING...");
+  lv_obj_set_style_text_color(statusLbl, sgGauge.ecuConnected ? SG_GUI_OK : SG_GUI_WARN, 0);
+
+  if (!sgGauge.ecuConnected) {
+    return;
+  }
+
+  char buf[24];
+
+  if (sgGuiPage == 0) {
+    snprintf(buf, sizeof(buf), "%4u", sgGauge.rpm);
+    sgGuiSetText(sgP0.rpm, buf);
+
+    snprintf(buf, sizeof(buf), "%.1f%%", sgGauge.tps);
+    sgGuiSetText(sgP0.tps, buf);
+
+    snprintf(buf, sizeof(buf), "%dC", sgGauge.tempC);
+    sgGuiSetText(sgP0.temp, buf);
+
+    snprintf(buf, sizeof(buf), "%.1fV", sgGauge.batteryV);
+    sgGuiSetText(sgP0.bat, buf);
+
+    snprintf(buf, sizeof(buf), "%.2fms", sgGauge.injectorMs);
+    sgGuiSetText(sgP0.inj, buf);
+
+    snprintf(buf, sizeof(buf), "%.1f", sgGauge.ignitionDeg);
+    sgGuiSetText(sgP0.ign, buf);
+
+    snprintf(buf, sizeof(buf), "%u km/h", sgGauge.speedKmh);
+    sgGuiSetText(sgP0.speed, buf);
+
+    snprintf(buf, sizeof(buf), "%.2fV", sgGauge.o2[0].voltV);
+    sgGuiSetText(sgP0.o2, buf);
+
+    // MAP comes from the slow-polled extended tables (10/11/13/60/61/63/67),
+    // not table 17/20 like the rest of this page -- same "--" until polled
+    // caveat as page 1's fields below.
+    if (sgGauge.ext.ok) {
+      snprintf(buf, sizeof(buf), "%ukPa", sgGauge.ext.mapKpa);
+      sgGuiSetText(sgP0.mapKpa, buf);
+    } else {
+      sgGuiSetText(sgP0.mapKpa, "--");
+    }
+
+    return;
+  }
+
+  // Page 1: extended tables -- each field shows "--" until its table has
+  // actually been polled once (SG_EXT_TABLES round-robins through all of
+  // them, so this can take a few seconds after connecting).
+  if (sgGauge.ext.ok) {
+    snprintf(buf, sizeof(buf), "%dC", sgGauge.ext.iatTempC);
+    sgGuiSetText(sgP1.iat, buf);
+
+    snprintf(buf, sizeof(buf), "%dC", sgGauge.ext.eotTempC);
+    sgGuiSetText(sgP1.eot, buf);
+
+    snprintf(buf, sizeof(buf), "%u %s", sgGauge.ext.mode, sgGauge.ext.fastIdleOn ? "FI" : "-");
+    sgGuiSetText(sgP1.mode, buf);
+  } else {
+    sgGuiSetText(sgP1.iat, "--");
+    sgGuiSetText(sgP1.eot, "--");
+    sgGuiSetText(sgP1.mode, "--");
+  }
+
+  if (sgGauge.o2[1].ok) {
+    snprintf(buf, sizeof(buf), "%.2fV", sgGauge.o2[1].voltV);
+    sgGuiSetText(sgP1.o2b2, buf);
+  } else {
+    sgGuiSetText(sgP1.o2b2, "--");
+  }
+
+  if (sgGauge.digital.ok) {
+    snprintf(buf, sizeof(buf), "%u", sgGauge.digital.gearBankStand);
+    sgGuiSetText(sgP1.gear, buf);
+
+    sgGuiSetText(sgP1.fuelPump, sgGauge.digital.fuelPumpOn ? "ON" : "OFF");
+    sgGuiSetText(sgP1.coolFan, sgGauge.digital.coolingFanOn ? "ON" : "OFF");
+  } else {
+    sgGuiSetText(sgP1.gear, "--");
+    sgGuiSetText(sgP1.fuelPump, "--");
+    sgGuiSetText(sgP1.coolFan, "--");
+  }
+
+  if (sgGauge.ecmCodeOk) {
+    snprintf(
+      buf, sizeof(buf), "%02X%02X%02X%02X%02X",
+      sgGauge.ecmCode[0], sgGauge.ecmCode[1], sgGauge.ecmCode[2],
+      sgGauge.ecmCode[3], sgGauge.ecmCode[4]
+    );
+    sgGuiSetText(sgP1.ecmId, buf);
+  } else {
+    sgGuiSetText(sgP1.ecmId, "--");
+  }
+}
