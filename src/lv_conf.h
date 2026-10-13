@@ -36,6 +36,7 @@
 #define LV_USE_BUTTON 1
 #define LV_USE_BTN 1 // same widget, old (v8) name -- harmless if unused on v9
 #define LV_USE_THEME_DEFAULT 1
+#define LV_USE_QRCODE 1 // support QR code overlay, see Gui.cpp
 
 #define LV_FONT_MONTSERRAT_22 1
 #define LV_FONT_MONTSERRAT_34 1

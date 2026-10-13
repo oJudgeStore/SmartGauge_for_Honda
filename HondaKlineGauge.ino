@@ -192,8 +192,9 @@ void setup() {
     sizeof(sgGauge));
 
   sgKLineBegin();
-  sgKLineTaskStart();  // polls K-line on its own core from here on -- see Protocol.h
   sgGuiInit();
+  sgGuiBootSplash();   // QR + progress bar first, then connect and probe the tables
+  sgKLineTaskStart();  // polls K-line on its own core from here on -- see Protocol.h
 }
 
 // Runs on core 1 (Arduino's default loop() core): GUI/touch + Serial. The

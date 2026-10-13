@@ -80,6 +80,18 @@ clear, `t` to redo the touch calibration, and `s` to print the raw reply of ever
   running bike has not been verified yet.
 - Use at your own risk. Do not rely on it for safety-critical decisions.
 
+## Support (advertisement)
+
+The gauge shows a QR code with a progress bar for about 8 seconds at power-on, before it connects to the ECU. After
+that it shows the QR code for 5 seconds every minute.
+While the DTC page is open it shows only every 5 minutes.
+It links to a Shopee page. It is an advertisement: buying through it may earn the author a commission, and it costs
+you nothing extra. The touch controls keep working while it is up (double-tap still switches pages), but the live
+values are covered for those 5 seconds.
+
+**Please do not remove it.** The QR code is part of this project, so keep it, unchanged, in copies and modified
+versions that you share or sell. The link is `SG_QR_URL` in [`src/Gui.cpp`](src/Gui.cpp).
+
 ## Credits
 
 Started from the "Educational Core" sketch in

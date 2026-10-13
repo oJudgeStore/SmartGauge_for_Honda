@@ -425,6 +425,98 @@ static void sgGuiRefreshDtcPage() {
 }
 
 // ---------------------------------------------------------------------------
+// Support QR code: a shop link shown for SG_QR_SHOW_MS every SG_QR_PERIOD_MS on
+// top of every page (README "Support"). It is not clickable, so touch/page
+// switching keep working underneath. NOTICE: this advertisement is part of the
+// project -- keep it in copies and modified versions you distribute.
+// ---------------------------------------------------------------------------
+
+#define SG_QR_URL        "https://s.shopee.co.th/2LZ2cn2Vgh?share_channel_code=6"
+#define SG_QR_PERIOD_MS  60000UL  // gauge pages
+#define SG_QR_PERIOD_DTC_MS 300000UL // while the DTC page is open
+#define SG_QR_SHOW_MS     5000UL
+
+static lv_obj_t *sgQrBox;
+static uint32_t sgQrShownAtMs = 0; // last show (or end of the boot splash); the next one is a period later
+
+static void sgGuiBuildQr() {
+  sgQrBox = lv_obj_create(lv_layer_top());
+  lv_obj_set_size(sgQrBox, 300, 310);
+  lv_obj_center(sgQrBox);
+  lv_obj_set_style_bg_color(sgQrBox, lv_color_white(), 0);
+  lv_obj_set_style_bg_opa(sgQrBox, LV_OPA_COVER, 0);
+  lv_obj_set_style_border_width(sgQrBox, 0, 0);
+  lv_obj_set_style_pad_all(sgQrBox, 0, 0);
+  lv_obj_remove_flag(sgQrBox, (lv_obj_flag_t)(LV_OBJ_FLAG_CLICKABLE | LV_OBJ_FLAG_SCROLLABLE));
+
+  lv_obj_t *title = lv_label_create(sgQrBox);
+  lv_label_set_text(title, "SCAN TO SUPPORT");
+  lv_obj_set_style_text_font(title, &lv_font_montserrat_22, 0);
+  lv_obj_set_style_text_color(title, lv_color_black(), 0);
+  lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 12);
+
+  lv_obj_t *qr = lv_qrcode_create(sgQrBox);
+  lv_qrcode_set_size(qr, 250);
+  lv_qrcode_set_quiet_zone(qr, true);
+  lv_qrcode_set_dark_color(qr, lv_color_black());
+  lv_qrcode_set_light_color(qr, lv_color_white());
+  lv_qrcode_update(qr, SG_QR_URL, strlen(SG_QR_URL));
+  lv_obj_align(qr, LV_ALIGN_BOTTOM_MID, 0, -10);
+
+  lv_obj_add_flag(sgQrBox, LV_OBJ_FLAG_HIDDEN);
+}
+
+static void sgGuiTickQr(uint32_t now) {
+  static bool shown = false;
+
+  const uint32_t period = (sgGuiPage == SG_GUI_PAGE_DTC) ? SG_QR_PERIOD_DTC_MS : SG_QR_PERIOD_MS;
+
+  if (!shown && now - sgQrShownAtMs >= period) {
+    shown = true;
+    sgQrShownAtMs = now;
+    lv_obj_remove_flag(sgQrBox, LV_OBJ_FLAG_HIDDEN);
+  } else if (shown && now - sgQrShownAtMs >= SG_QR_SHOW_MS) {
+    shown = false;
+    lv_obj_add_flag(sgQrBox, LV_OBJ_FLAG_HIDDEN);
+  }
+}
+
+// Boot splash: the QR code with a progress bar for SG_BOOT_SPLASH_MS. Blocks on
+// purpose -- setup() starts the K-line task (wakeup + table probe) only after this.
+#define SG_BOOT_SPLASH_MS 8000UL
+
+void sgGuiBootSplash() {
+  lv_obj_t *bar = lv_bar_create(lv_layer_top());
+  lv_obj_set_size(bar, 280, 16);
+  lv_obj_align(bar, LV_ALIGN_BOTTOM_MID, 0, -30);
+  lv_bar_set_range(bar, 0, 100);
+
+  lv_obj_t *label = lv_label_create(lv_layer_top());
+  lv_label_set_text(label, "STARTING...");
+  lv_obj_set_style_text_font(label, &lv_font_montserrat_22, 0);
+  lv_obj_align_to(label, bar, LV_ALIGN_OUT_TOP_MID, 0, -8);
+
+  lv_obj_remove_flag(sgQrBox, LV_OBJ_FLAG_HIDDEN);
+
+  const uint32_t startMs = millis();
+  uint32_t elapsed = 0;
+
+  while (elapsed < SG_BOOT_SPLASH_MS) {
+    lv_bar_set_value(bar, (int32_t)(elapsed * 100UL / SG_BOOT_SPLASH_MS), LV_ANIM_OFF);
+    sgGuiPollTouch();
+    delay(20);
+    elapsed = millis() - startMs;
+  }
+
+  lv_obj_delete(bar);
+  lv_obj_delete(label);
+  lv_obj_add_flag(sgQrBox, LV_OBJ_FLAG_HIDDEN);
+
+  sgQrShownAtMs = millis();
+  lv_refr_now(NULL);
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -476,6 +568,12 @@ void sgGuiInit() {
   lv_obj_add_flag(sgGuiPageObj[SG_GUI_PAGE_DTC], LV_OBJ_FLAG_HIDDEN);
 
   sgGuiApplySupport(TableSupport());
+
+  sgGuiBuildQr();
+
+  lv_mem_monitor_t mon;
+  lv_mem_monitor(&mon);
+  Serial.printf("[GUI] LVGL heap: %u of %u bytes free\n", (unsigned)mon.free_size, (unsigned)LV_MEM_SIZE);
 }
 
 // Drives LVGL's tick + timer/render/touch handling. Unthrottled (call every
@@ -503,6 +601,7 @@ void sgGuiUpdate() {
 
   lastMs = now;
 
+  sgGuiTickQr(now);
   sgGuiDrawBackground();
 
   if (sgGuiPage == SG_GUI_PAGE_DTC) {
